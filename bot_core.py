@@ -29,69 +29,40 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 db_pool = None
 scheduler = AsyncIOScheduler()
 
-# Language texts
+# 只保留繁体中文文本
 TEXTS = {
-    'zh': {
-        'welcome': '👋 歡迎使用待辦事項機器人！\n使用 /help 查看幫助',
-        'choose_language': '🌐 請選擇語言：',
-        'main_menu': '🏠 主選單 - 請選擇操作：',
-        'query_all': '📋 所有待辦事項',
-        'query_category': '🔍 分類查詢',
-        'add_todo': '📝 新增待辦',
-        'delete_todo': '🗑️ 刪除待辦',
-        'change_language': '🌐 切換語言',
-        'help': '❓ 幫助',
-        'choose_category': '📂 請選擇類別：',
-        'enter_task': '✏️ 請輸入待辦事項內容：',
-        'need_reminder': '⏰ 需要設置提醒嗎？',
-        'enter_reminder_time': '🕒 請輸入提醒時間（格式：HH:MM 或 幾小時後）：',
-        'task_added': '✅ 已成功添加待辦事項！',
-        'no_tasks': '📭 目前沒有待辦事項',
-        'tasks_in_category': '📋 {}類別的待辦事項：',
-        'all_tasks': '📋 所有待辦事項：',
-        'reminder_set': '⏰ 已設置提醒於 {}',
-        'invalid_time': '❌ 時間格式錯誤，請使用 HH:MM 格式或 "X小時後"',
-        'category_game': '🎮 遊戲',
-        'category_movie': '📺 影視',
-        'category_action': '⭐ 行動',
-        'choose_todo_delete': '🗑️ 請選擇要刪除的待辦事項：',
-        'task_deleted': '✅ 已刪除待辦事項',
-        'help_text': '📖 幫助：\n- 新增待辦：選擇類別 > 輸入內容 > 選擇是否提醒\n- 查詢：查看所有或按類別\n- 刪除：選擇要刪除的項目\n- 語言：切換中英'
-    },
-    'en': {
-        'welcome': '👋 Welcome to Todo Bot!\nUse /help for help',
-        'choose_language': '🌐 Please choose language:',
-        'main_menu': '🏠 Main Menu - Please choose operation:',
-        'query_all': '📋 All Todos',
-        'query_category': '🔍 Query by Category',
-        'add_todo': '📝 Add Todo',
-        'delete_todo': '🗑️ Delete Todo',
-        'change_language': '🌐 Change Language',
-        'help': '❓ Help',
-        'choose_category': '📂 Please choose category:',
-        'enter_task': '✏️ Please enter todo content:',
-        'need_reminder': '⏰ Do you need a reminder?',
-        'enter_reminder_time': '🕒 Please enter reminder time (format: HH:MM or in X hours):',
-        'task_added': '✅ Todo added successfully!',
-        'no_tasks': '📭 No tasks at the moment',
-        'tasks_in_category': '📋 Todos in {} category:',
-        'all_tasks': '📋 All todos:',
-        'reminder_set': '⏰ Reminder set for {}',
-        'invalid_time': '❌ Invalid time format, please use HH:MM or "in X hours"',
-        'category_game': '🎮 Games',
-        'category_movie': '📺 Movies',
-        'category_action': '⭐ Actions',
-        'choose_todo_delete': '🗑️ Please select todo to delete:',
-        'task_deleted': '✅ Todo deleted successfully',
-        'help_text': '📖 Help:\n- Add Todo: Choose category > Enter content > Set reminder if needed\n- Query: View all or by category\n- Delete: Select item to delete\n- Language: Switch between EN/ZH'
-    }
+    'welcome': '👋 歡迎使用待辦事項機器人！\n使用 /help 查看幫助',
+    'choose_language': '🌐 請選擇語言：',
+    'main_menu': '🏠 主選單 - 請選擇操作：',
+    'query_all': '📋 所有待辦事項',
+    'query_category': '🔍 分類查詢',
+    'add_todo': '📝 新增待辦',
+    'delete_todo': '🗑️ 刪除待辦',
+    'change_language': '🌐 切換語言',
+    'help': '❓ 幫助',
+    'choose_category': '📂 請選擇類別：',
+    'enter_task': '✏️ 請輸入待辦事項內容：',
+    'need_reminder': '⏰ 需要設置提醒嗎？',
+    'enter_reminder_time': '🕒 請輸入提醒時間（格式：HH:MM 或 幾小時後）：',
+    'task_added': '✅ 已成功添加待辦事項！',
+    'no_tasks': '📭 目前沒有待辦事項',
+    'tasks_in_category': '📋 {}類別的待辦事項：',
+    'all_tasks': '📋 所有待辦事項：',
+    'reminder_set': '⏰ 已設置提醒於 {}',
+    'invalid_time': '❌ 時間格式錯誤，請使用 HH:MM 格式或 "X小時後"',
+    'category_game': '🎮 遊戲',
+    'category_movie': '📺 影視',
+    'category_action': '⭐ 行動',
+    'choose_todo_delete': '🗑️ 請選擇要刪除的待辦事項：',
+    'task_deleted': '✅ 已刪除待辦事項',
+    'help_text': '📖 幫助：\n- 新增待辦：選擇類別 > 輸入內容 > 選擇是否提醒\n- 查詢：查看所有或按類別\n- 刪除：選擇要刪除的項目\n- 語言：切換中英'
 }
 
 # Categories
 CATEGORIES = {
-    'game': {'zh': '🎮 遊戲', 'en': '🎮 Games'},
-    'movie': {'zh': '📺 影視', 'en': '📺 Movies'},
-    'action': {'zh': '⭐ 行動', 'en': '⭐ Actions'}
+    'game': '🎮 遊戲',
+    'movie': '📺 影視',
+    'action': '⭐ 行動'
 }
 
 # 初始化数据库连接池
@@ -151,38 +122,6 @@ def init_db():
         logger.info("Database tables initialized successfully")
     except Exception as e:
         logger.critical(f"Database initialization failed: {e}")
-        raise
-    finally:
-        put_db_connection(conn)
-
-def get_user_language(user_id):
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT language FROM users WHERE user_id = %s", (user_id,))
-        result = c.fetchone()
-        return result[0] if result else 'zh'
-    except Exception as e:
-        logger.error(f"Error getting user language: {e}")
-        return 'zh'
-    finally:
-        put_db_connection(conn)
-
-def set_user_language(user_id, language):
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO users (user_id, language) 
-            VALUES (%s, %s)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET language = EXCLUDED.language
-        """, (user_id, language))
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Error setting user language: {e}")
         raise
     finally:
         put_db_connection(conn)
@@ -256,41 +195,33 @@ def delete_todo(user_id, todo_id):
         put_db_connection(conn)
 
 # Keyboard functions
-def get_main_keyboard(language):
-    text = TEXTS[language]
+def get_main_keyboard():
     return ReplyKeyboardMarkup([
-        [text['query_all'], text['query_category']],
-        [text['add_todo'], text['delete_todo']],
-        [text['change_language'], text['help']]
+        [TEXTS['query_all'], TEXTS['query_category']],
+        [TEXTS['add_todo'], TEXTS['delete_todo']],
+        [TEXTS['change_language'], TEXTS['help']]
     ], resize_keyboard=True, one_time_keyboard=False)
 
-def get_category_keyboard(language, operation_type):
+def get_category_keyboard(operation_type):
     keyboard = []
-    for category_id, category_names in CATEGORIES.items():
-        keyboard.append([InlineKeyboardButton(category_names[language], callback_data=f'{operation_type}_category_{category_id}')])
+    for category_id, category_name in CATEGORIES.items():
+        keyboard.append([InlineKeyboardButton(category_name, callback_data=f'{operation_type}_category_{category_id}')])
     return InlineKeyboardMarkup(keyboard)
 
-def get_reminder_keyboard(language):
-    text = TEXTS[language]
+def get_reminder_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ " + ("是" if language == 'zh' else "Yes"), callback_data='reminder_yes'),
-         InlineKeyboardButton("❌ " + ("否" if language == 'zh' else "No"), callback_data='reminder_no')]
+        [InlineKeyboardButton("✅ 是", callback_data='reminder_yes'),
+         InlineKeyboardButton("❌ 否", callback_data='reminder_no')]
     ])
 
-def get_language_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇨🇳 中文", callback_data='lang_zh'),
-         InlineKeyboardButton("🇬🇧 ENG", callback_data='lang_en')]
-    ])
-
-def get_delete_keyboard(language, todos):
+def get_delete_keyboard(todos):
     keyboard = []
     for todo_id, _, task, _ in todos:
         keyboard.append([InlineKeyboardButton(f"{task[:20]}...", callback_data=f'delete_{todo_id}')])
     return InlineKeyboardMarkup(keyboard)
 
 # Time parsing function
-def parse_reminder_time(time_str, language):
+def parse_reminder_time(time_str):
     try:
         time_str = time_str.lower().strip()
         if ':' in time_str:
@@ -300,111 +231,75 @@ def parse_reminder_time(time_str, language):
             if reminder_time < now:
                 reminder_time += timedelta(days=1)
             return reminder_time
-        if language == 'en':
-            if 'hour' in time_str or 'hours' in time_str:
-                hours = int(''.join(filter(str.isdigit, time_str)))
-                return datetime.now() + timedelta(hours=hours)
-        elif language == 'zh':
-            if '小時' in time_str or '小时' in time_str or '後' in time_str or '后' in time_str:
-                hours = int(''.join(filter(str.isdigit, time_str)))
-                return datetime.now() + timedelta(hours=hours)
+        if '小時' in time_str or '小时' in time_str or '後' in time_str or '后' in time_str:
+            hours = int(''.join(filter(str.isdigit, time_str)))
+            return datetime.now() + timedelta(hours=hours)
     except (ValueError, AttributeError):
         pass
     return None
 
 # Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     await update.message.reply_text(
-        text['welcome'],
-        reply_markup=get_main_keyboard(language)
+        TEXTS['welcome'],
+        reply_markup=get_main_keyboard()
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     await update.message.reply_text(
-        text['help_text'],
-        reply_markup=get_main_keyboard(language)
-    )
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
-    context.user_data.clear()
-    await update.message.reply_text(
-        text['welcome'],
-        reply_markup=get_main_keyboard(language)
+        TEXTS['help_text'],
+        reply_markup=get_main_keyboard()
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     message_text = update.message.text
 
-    if message_text == text['query_all']:
+    if message_text == TEXTS['query_all']:
         await query_all_todos(update, context)
-    elif message_text == text['query_category']:
+    elif message_text == TEXTS['query_category']:
         await choose_category(update, context, 'query')
-    elif message_text == text['add_todo']:
+    elif message_text == TEXTS['add_todo']:
         await choose_category(update, context, 'add')
-    elif message_text == text['delete_todo']:
+    elif message_text == TEXTS['delete_todo']:
         await choose_delete(update, context)
-    elif message_text == text['change_language']:
-        await change_language(update, context)
-    elif message_text == text['help']:
+    elif message_text == TEXTS['help']:
         await help_command(update, context)
     else:
         if 'waiting_task' in context.user_data:
             context.user_data['waiting_task'] = message_text
             await update.message.reply_text(
-                text['need_reminder'],
-                reply_markup=get_reminder_keyboard(language)
+                TEXTS['need_reminder'],
+                reply_markup=get_reminder_keyboard()
             )
         elif 'waiting_reminder_time' in context.user_data:
-            reminder_time = parse_reminder_time(message_text, language)
+            reminder_time = parse_reminder_time(message_text)
             if reminder_time:
                 category = context.user_data['waiting_category']
                 task = context.user_data['waiting_task']
                 todo_id = add_todo_to_db(user_id, category, task, reminder_time)
                 await schedule_reminder(user_id, task, reminder_time, todo_id, context)
                 await update.message.reply_text(
-                    text['reminder_set'].format(reminder_time.strftime('%Y-%m-%d %H:%M')),
-                    reply_markup=get_main_keyboard(language)
+                    TEXTS['reminder_set'].format(reminder_time.strftime('%Y-%m-%d %H:%M')),
+                    reply_markup=get_main_keyboard()
                 )
                 context.user_data.clear()
             else:
                 await update.message.reply_text(
-                    text['invalid_time'] + '\n' + text['enter_reminder_time']
+                    TEXTS['invalid_time'] + '\n' + TEXTS['enter_reminder_time']
                 )
 
 async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     data = query.data
 
-    if data.startswith('lang_'):
-        new_language = data.split('_')[1]
-        set_user_language(user_id, new_language)
-        await query.edit_message_text(f"✅ Language changed to {new_language.upper()}")
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=TEXTS[new_language]['welcome'],
-            reply_markup=get_main_keyboard(new_language)
-        )
-    elif data.startswith('add_category_'):
+    if data.startswith('add_category_'):
         category = data.split('_')[2]
         context.user_data['waiting_category'] = category
         context.user_data['waiting_task'] = True
-        await query.edit_message_text(text['enter_task'])
+        await query.edit_message_text(TEXTS['enter_task'])
     elif data.startswith('query_category_'):
         category = data.split('_')[2]
         await show_todos_by_category(query, context, category)
@@ -413,64 +308,56 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ 操作已過期，請重新開始")
             return
         if data == 'reminder_yes':
-            await query.edit_message_text(text['enter_reminder_time'])
+            await query.edit_message_text(TEXTS['enter_reminder_time'])
             context.user_data['waiting_reminder_time'] = True
         else:
             category = context.user_data['waiting_category']
             task = context.user_data['waiting_task']
             add_todo_to_db(user_id, category, task)
-            await query.edit_message_text(text['task_added'])
+            await query.edit_message_text(TEXTS['task_added'])
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                reply_markup=get_main_keyboard(language)
+                reply_markup=get_main_keyboard()
             )
             context.user_data.clear()
-        elif data.startswith('delete_'):
+    elif data.startswith('delete_'):
         todo_id = int(data.split('_')[1])
         if delete_todo(user_id, todo_id):
-            await query.edit_message_text(text['task_deleted'])
+            await query.edit_message_text(TEXTS['task_deleted'])
         else:
-            await query.edit_message_text("❌ 删除失败")
+            await query.edit_message_text("❌ 刪除失敗")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            reply_markup=get_main_keyboard(language)
+            reply_markup=get_main_keyboard()
         )
 
-
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
-    user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     await update.message.reply_text(
-        text['choose_category'],
-        reply_markup=get_category_keyboard(language, operation_type)
+        TEXTS['choose_category'],
+        reply_markup=get_category_keyboard(operation_type)
     )
 
 async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     todos = get_todos(user_id)
     if not todos:
-        await update.message.reply_text(text['no_tasks'])
+        await update.message.reply_text(TEXTS['no_tasks'])
         return
-    message = text['all_tasks'] + '\n\n'
+    message = TEXTS['all_tasks'] + '\n\n'
     for i, (_, category, task, reminder_time) in enumerate(todos, 1):
-        category_name = CATEGORIES[category][language]
+        category_name = CATEGORIES[category]
         reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {category_name}: {task}{reminder_text}\n"
-    await update.message.reply_text(message, reply_markup=get_main_keyboard(language))
+    await update.message.reply_text(message, reply_markup=get_main_keyboard())
 
 async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, category):
     user_id = query.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     todos = get_todos(user_id, category)
     if not todos:
-        await query.edit_message_text(text['no_tasks'])
+        await query.edit_message_text(TEXTS['no_tasks'])
         return
-    category_name = CATEGORIES[category][language]
-    message = text['tasks_in_category'].format(category_name) + '\n\n'
+    category_name = CATEGORIES[category]
+    message = TEXTS['tasks_in_category'].format(category_name) + '\n\n'
     for i, (_, _, task, reminder_time) in enumerate(todos, 1):
         reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {task}{reminder_text}\n"
@@ -478,27 +365,18 @@ async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, cate
 
 async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
     todos = get_todos(user_id)
     if not todos:
-        await update.message.reply_text(text['no_tasks'])
+        await update.message.reply_text(TEXTS['no_tasks'])
         return
     await update.message.reply_text(
-        text['choose_todo_delete'],
-        reply_markup=get_delete_keyboard(language, todos)
-    )
-
-async def change_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🌐 請選擇語言 / Please choose language:",
-        reply_markup=get_language_keyboard()
+        TEXTS['choose_todo_delete'],
+        reply_markup=get_delete_keyboard(todos)
     )
 
 async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
     async def send_reminder():
         try:
-            language = get_user_language(user_id)
             await context.bot.send_message(
                 chat_id=user_id,
                 text=f"⏰ 提醒: {task}"
@@ -514,7 +392,6 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
 # 健康检查服务器
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        logger.info(f"Received health check request: {self.path}")
         if self.path in ['/', '/health']:
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
@@ -524,27 +401,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-    
-    def do_HEAD(self):
-        logger.info(f"Received health check HEAD request: {self.path}")
-        if self.path in ['/', '/health']:
-            self.send_response(200)
-            self.end_headers()
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-def is_port_available(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('0.0.0.0', port)) != 0
 
 def run_health_server():
-    port = 10000
-    if not is_port_available(port):
-        logger.error(f"Port {port} is already in use")
-        return
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    logger.info(f"Health check server started on port {port}")
+    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+    logger.info("Health check server started on port 10000")
     server.serve_forever()
 
 def check_env_vars():
@@ -568,13 +428,12 @@ async def main():
         application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("cancel", cancel))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(callback_query))
         
         logger.info("Starting bot with polling mode...")
         
-        # 删除webhook并开始轮询
+        # 使用正确的轮询模式
         await application.bot.delete_webhook(drop_pending_updates=True)
         await application.run_polling()
             
