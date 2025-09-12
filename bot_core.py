@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 # 环境变量
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-PORT = int(os.getenv('PORT', 8443))
 
 # 全局连接池和调度器
 db_pool = None
@@ -515,7 +514,7 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         logger.info(f"Received health check request: {self.path}")
-        if self.path == '/health':
+        if self.path in ['/', '/health']:
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -527,7 +526,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     
     def do_HEAD(self):
         logger.info(f"Received health check HEAD request: {self.path}")
-        if self.path == '/health':
+        if self.path in ['/', '/health']:
             self.send_response(200)
             self.end_headers()
         else:
@@ -554,8 +553,6 @@ def check_env_vars():
         raise ValueError("DATABASE_URL environment variable not set")
 
 async def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     application = None
     try:
         check_env_vars()
@@ -572,15 +569,9 @@ async def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(callback_query))
         
-        logger.info("Starting bot with webhook mode...")
-        webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
-        await application.bot.set_webhook(webhook_url)
-        await application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=webhook_url
-        )
+        logger.info("Starting bot with polling mode...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.run_polling()
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         if application:
@@ -589,13 +580,7 @@ async def main():
     finally:
         scheduler.shutdown()
         close_db_pool()
-        if not loop.is_closed():
-            loop.close()
 
 if __name__ == '__main__':
-    main_loop = asyncio.get_event_loop()
-    if main_loop.is_running():
-        logger.warning("Main loop is already running, creating a new one")
-        main_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(main_loop)
-    main_loop.run_until_complete(main())
+    loop = asyncio.get_event_loop_policy().get_event_loop()
+    loop.run_until_complete(main())
