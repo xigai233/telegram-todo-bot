@@ -1,3 +1,6 @@
+我看到你的文件结构完全混乱了！有多个重复的 `main()` 函数和 `if __name__ == '__main__':` 块。让我给你提供完整的修复版本：
+
+```python
 import os
 import logging
 import json
@@ -425,16 +428,17 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_main_keyboard(language)
             )
             context.user_data.clear()
-    elif data.startswith('delete_'):
+        elif data.startswith('delete_'):
         todo_id = int(data.split('_')[1])
         if delete_todo(user_id, todo_id):
             await query.edit_message_text(text['task_deleted'])
         else:
-            await query.edit_message_text("❌ 刪除失敗")
+            await query.edit_message_text("❌ 删除失败")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             reply_markup=get_main_keyboard(language)
         )
+
 
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
     user_id = update.message.from_user.id
@@ -553,6 +557,7 @@ def check_env_vars():
         raise ValueError("DATABASE_URL environment variable not set")
 
 async def main():
+    application = None
     try:
         check_env_vars()
         init_db_pool()
@@ -572,13 +577,14 @@ async def main():
         
         logger.info("Starting bot with polling mode...")
         
-        # 使用正确的异步上下文管理器
-        async with application:
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            await application.run_polling()
+        # 删除webhook并开始轮询
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.run_polling()
             
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
+        if application:
+            await application.shutdown()
         raise
     finally:
         if scheduler.running:
@@ -588,35 +594,3 @@ async def main():
 if __name__ == '__main__':
     # 使用现代的事件循环启动方式
     asyncio.run(main())
-
-    application = None
-    try:
-        check_env_vars()
-        init_db_pool()
-        init_db()
-        scheduler.start()
-        health_thread = threading.Thread(target=run_health_server, daemon=True)
-        health_thread.start()
-        
-        application = Application.builder().token(TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("cancel", cancel))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(callback_query))
-        
-        logger.info("Starting bot with polling mode...")
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        await application.run_polling()
-    except Exception as e:
-        logger.error(f"Bot startup failed: {e}")
-        if application:
-            await application.shutdown()
-        raise
-    finally:
-        scheduler.shutdown()
-        close_db_pool()
-
-if __name__ == '__main__':
-    loop = asyncio.get_event_loop_policy().get_event_loop()
-    loop.run_until_complete(main())
