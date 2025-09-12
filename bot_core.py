@@ -326,21 +326,14 @@ async def main():
         
         logger.info("Starting bot with polling mode...")
         
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        
-        # 保持运行
-        await asyncio.Future()
+        # 使用 run_polling 而不是手動管理事件循環
+        await application.run_polling()
             
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         raise
     finally:
-        if application:
-            await application.stop()
-            await application.shutdown()
         close_db_pool()
-
 if __name__ == '__main__':
+    # 使用 asyncio.run 來啟動應用程序
     asyncio.run(main())
