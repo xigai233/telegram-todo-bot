@@ -311,7 +311,7 @@ def check_env_vars():
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable not set")
 
-async def main():
+def main():
     application = None
     try:
         check_env_vars()
@@ -326,14 +326,16 @@ async def main():
         
         logger.info("Starting bot with polling mode...")
         
-        # 使用 run_polling 而不是手動管理事件循環
-        await application.run_polling()
+        # 使用同步的 run_polling 方法
+        application.run_polling()
             
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         raise
     finally:
         close_db_pool()
+
 if __name__ == '__main__':
-    # 使用 asyncio.run 來啟動應用程序
-    asyncio.run(main())
+    # 直接調用同步的 main 函數
+    main()
+
