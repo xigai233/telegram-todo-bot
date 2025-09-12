@@ -10,6 +10,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Enable logging
 logging.basicConfig(
@@ -419,6 +421,84 @@ def main():
         )
     except Exception as e:
         logger.error(f"Polling error: {e}")
+DATABASE_URL = os.getenv('DATABASE_URL')
+def get_db_connection():
+    """獲取PostgreSQL數據庫連接"""
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+def init_db():
+    """初始化數據庫表結構"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # 創建users表
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (user_id BIGINT PRIMARY KEY, 
+                  language TEXT DEFAULT 'zh', 
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # 創建todos表
+    c.execute('''CREATE TABLE IF NOT EXISTS todos
+                 (id SERIAL PRIMARY KEY, 
+                  user_id BIGINT, 
+                  category TEXT,
+                  task TEXT, 
+                  reminder_time TIMESTAMP NULL,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY(user_id) REFERENCES users(user_id))''')
+    
+    conn.commit()
+    conn.close()
+def get_user_language(user_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT language FROM users WHERE user_id = %s", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 'zh'
+def set_user_language(user_id, language):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO users (user_id, language) 
+        VALUES (%s, %s)
+        ON CONFLICT (user_id) 
+        DO UPDATE SET language = EXCLUDED.language
+    """, (user_id, language))
+    conn.commit()
+    conn.close()
+def add_todo_to_db(user_id, category, task, reminder_time=None):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO todos (user_id, category, task, reminder_time) 
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+    """, (user_id, category, task, reminder_time))
+    todo_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return todo_id
+def get_todos(user_id, category=None):
+    conn = get_db_connection()
+    c = conn.cursor()
+    if category:
+        c.execute("""
+            SELECT category, task, reminder_time 
+            FROM todos 
+            WHERE user_id = %s AND category = %s 
+            ORDER BY created_at
+        """, (user_id, category))
+    else:
+        c.execute("""
+            SELECT category, task, reminder_time 
+            FROM todos 
+            WHERE user_id = %s 
+            ORDER BY created_at
+        """, (user_id,))
+    todos = c.fetchall()
+    conn.close()
+    return todos
 
 if __name__ == '__main__':
     main()
