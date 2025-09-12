@@ -11,31 +11,36 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import psycopg2.pool
+import socket
 
-# Enable logging
+# 配置日志
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Get environment variables
+# 环境变量
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# Global scheduler for reminders
+# 全局连接池和调度器
+db_pool = None
 scheduler = AsyncIOScheduler()
 
 # Language texts
 TEXTS = {
     'zh': {
-        'welcome': '👋 歡迎使用待辦事項機器人！',
+        'welcome': '👋 歡迎使用待辦事項機器人！\n使用 /help 查看幫助',
         'choose_language': '🌐 請選擇語言：',
         'main_menu': '🏠 主選單 - 請選擇操作：',
         'query_all': '📋 所有待辦事項',
         'query_category': '🔍 分類查詢',
         'add_todo': '📝 新增待辦',
+        'delete_todo': '🗑️ 刪除待辦',
         'change_language': '🌐 切換語言',
+        'help': '❓ 幫助',
         'choose_category': '📂 請選擇類別：',
         'enter_task': '✏️ 請輸入待辦事項內容：',
         'need_reminder': '⏰ 需要設置提醒嗎？',
@@ -45,19 +50,24 @@ TEXTS = {
         'tasks_in_category': '📋 {}類別的待辦事項：',
         'all_tasks': '📋 所有待辦事項：',
         'reminder_set': '⏰ 已設置提醒於 {}',
-        'invalid_time': '❌ 時間格式錯誤，請使用 HH:MM 格式',
+        'invalid_time': '❌ 時間格式錯誤，請使用 HH:MM 格式或 "X小時後"',
         'category_game': '🎮 遊戲',
         'category_movie': '📺 影視',
-        'category_action': '⭐ 行動'
+        'category_action': '⭐ 行動',
+        'choose_todo_delete': '🗑️ 請選擇要刪除的待辦事項：',
+        'task_deleted': '✅ 已刪除待辦事項',
+        'help_text': '📖 幫助：\n- 新增待辦：選擇類別 > 輸入內容 > 選擇是否提醒\n- 查詢：查看所有或按類別\n- 刪除：選擇要刪除的項目\n- 語言：切換中英'
     },
     'en': {
-        'welcome': '👋 Welcome to Todo Bot!',
+        'welcome': '👋 Welcome to Todo Bot!\nUse /help for help',
         'choose_language': '🌐 Please choose language:',
         'main_menu': '🏠 Main Menu - Please choose operation:',
         'query_all': '📋 All Todos',
         'query_category': '🔍 Query by Category',
         'add_todo': '📝 Add Todo',
+        'delete_todo': '🗑️ Delete Todo',
         'change_language': '🌐 Change Language',
+        'help': '❓ Help',
         'choose_category': '📂 Please choose category:',
         'enter_task': '✏️ Please enter todo content:',
         'need_reminder': '⏰ Do you need a reminder?',
@@ -67,10 +77,13 @@ TEXTS = {
         'tasks_in_category': '📋 Todos in {} category:',
         'all_tasks': '📋 All todos:',
         'reminder_set': '⏰ Reminder set for {}',
-        'invalid_time': '❌ Invalid time format, please use HH:MM format',
+        'invalid_time': '❌ Invalid time format, please use HH:MM or "in X hours"',
         'category_game': '🎮 Games',
         'category_movie': '📺 Movies',
-        'category_action': '⭐ Actions'
+        'category_action': '⭐ Actions',
+        'choose_todo_delete': '🗑️ Please select todo to delete:',
+        'task_deleted': '✅ Todo deleted successfully',
+        'help_text': '📖 Help:\n- Add Todo: Choose category > Enter content > Set reminder if needed\n- Query: View all or by category\n- Delete: Select item to delete\n- Language: Switch between EN/ZH'
     }
 }
 
@@ -81,19 +94,45 @@ CATEGORIES = {
     'action': {'zh': '⭐ 行動', 'en': '⭐ Actions'}
 }
 
-# Database connection function
-def get_db_connection():
-    """獲取PostgreSQL數據庫連接"""
+# 初始化数据库连接池
+def init_db_pool():
+    global db_pool
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        return conn
-    except psycopg2.Error as e:
-        logger.error(f"Database connection error: {e}")
+        db_pool = psycopg2.pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
+            dsn=DATABASE_URL,
+            sslmode='require'
+        )
+        logger.info("Database connection pool initialized")
+    except Exception as e:
+        logger.critical(f"Database pool initialization failed: {e}")
         raise
 
-# Database functions - PostgreSQL only
+def get_db_connection():
+    global db_pool
+    if db_pool is None:
+        raise Exception("Database connection pool is not initialized")
+    try:
+        return db_pool.getconn()
+    except Exception as e:
+        logger.error(f"Error getting connection from pool: {e}")
+        raise
+
+def put_db_connection(conn):
+    if conn:
+        db_pool.putconn(conn)
+
+def close_db_pool():
+    global db_pool
+    if db_pool:
+        db_pool.closeall()
+        logger.info("Database connection pool closed")
+
+# Database functions
 def init_db():
     """初始化數據庫表結構"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -117,14 +156,14 @@ def init_db():
         conn.commit()
         logger.info("Database tables initialized successfully")
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.critical(f"Database initialization failed: {e}")
         raise
     finally:
-        if conn:
-            conn.close()
+        put_db_connection(conn)
 
 def get_user_language(user_id):
     """獲取用戶語言設置"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -135,11 +174,11 @@ def get_user_language(user_id):
         logger.error(f"Error getting user language: {e}")
         return 'zh'
     finally:
-        if conn:
-            conn.close()
+        put_db_connection(conn)
 
 def set_user_language(user_id, language):
     """設置用戶語言"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -154,14 +193,21 @@ def set_user_language(user_id, language):
         logger.error(f"Error setting user language: {e}")
         raise
     finally:
-        if conn:
-            conn.close()
+        put_db_connection(conn)
 
 def add_todo_to_db(user_id, category, task, reminder_time=None):
     """添加待辦事項到數據庫"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
+        # 確保用戶存在
+        c.execute("""
+            INSERT INTO users (user_id) 
+            VALUES (%s)
+            ON CONFLICT (user_id) DO NOTHING
+        """, (user_id,))
+        # 插入待辦事項
         c.execute("""
             INSERT INTO todos (user_id, category, task, reminder_time) 
             VALUES (%s, %s, %s, %s)
@@ -174,24 +220,24 @@ def add_todo_to_db(user_id, category, task, reminder_time=None):
         logger.error(f"Error adding todo: {e}")
         raise
     finally:
-        if conn:
-            conn.close()
+        put_db_connection(conn)
 
 def get_todos(user_id, category=None):
     """獲取待辦事項列表"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         if category:
             c.execute("""
-                SELECT category, task, reminder_time 
+                SELECT id, category, task, reminder_time 
                 FROM todos 
                 WHERE user_id = %s AND category = %s 
                 ORDER BY created_at
             """, (user_id, category))
         else:
             c.execute("""
-                SELECT category, task, reminder_time 
+                SELECT id, category, task, reminder_time 
                 FROM todos 
                 WHERE user_id = %s 
                 ORDER BY created_at
@@ -202,21 +248,39 @@ def get_todos(user_id, category=None):
         logger.error(f"Error getting todos: {e}")
         return []
     finally:
-        if conn:
-            conn.close()
+        put_db_connection(conn)
+
+def delete_todo(user_id, todo_id):
+    """刪除待辦事項"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("""
+            DELETE FROM todos 
+            WHERE user_id = %s AND id = %s
+        """, (user_id, todo_id))
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error deleting todo: {e}")
+        return False
+    finally:
+        put_db_connection(conn)
 
 # Keyboard functions
 def get_main_keyboard(language):
     text = TEXTS[language]
     return ReplyKeyboardMarkup([
         [text['query_all'], text['query_category']],
-        [text['add_todo'], text['change_language']]
-    ], resize_keyboard=True)
+        [text['add_todo'], text['delete_todo']],
+        [text['change_language'], text['help']]
+    ], resize_keyboard=True, one_time_keyboard=False)
 
-def get_category_keyboard(language):
+def get_category_keyboard(language, operation_type):
     keyboard = []
     for category_id, category_names in CATEGORIES.items():
-        keyboard.append([InlineKeyboardButton(category_names[language], callback_data=f'category_{category_id}')])
+        keyboard.append([InlineKeyboardButton(category_names[language], callback_data=f'{operation_type}_category_{category_id}')])
     return InlineKeyboardMarkup(keyboard)
 
 def get_reminder_keyboard(language):
@@ -232,9 +296,16 @@ def get_language_keyboard():
          InlineKeyboardButton("🇬🇧 ENG", callback_data='lang_en')]
     ])
 
+def get_delete_keyboard(language, todos):
+    keyboard = []
+    for todo_id, _, task, _ in todos:
+        keyboard.append([InlineKeyboardButton(f"{task[:20]}...", callback_data=f'delete_{todo_id}')])
+    return InlineKeyboardMarkup(keyboard)
+
 # Time parsing function
 def parse_reminder_time(time_str, language):
     try:
+        time_str = time_str.lower().strip()
         # Try HH:MM format
         if ':' in time_str:
             hours, minutes = map(int, time_str.split(':'))
@@ -245,13 +316,14 @@ def parse_reminder_time(time_str, language):
             return reminder_time
         
         # Try "in X hours" format
-        elif language == 'en' and 'hour' in time_str.lower():
-            hours = int(''.join(filter(str.isdigit, time_str)))
-            return datetime.now() + timedelta(hours=hours)
-        
-        elif language == 'zh' and ('小時' in time_str or '小时' in time_str):
-            hours = int(''.join(filter(str.isdigit, time_str)))
-            return datetime.now() + timedelta(hours=hours)
+        if language == 'en':
+            if 'hour' in time_str or 'hours' in time_str:
+                hours = int(''.join(filter(str.isdigit, time_str)))
+                return datetime.now() + timedelta(hours=hours)
+        elif language == 'zh':
+            if '小時' in time_str or '小时' in time_str or '後' in time_str or '后' in time_str:
+                hours = int(''.join(filter(str.isdigit, time_str)))
+                return datetime.now() + timedelta(hours=hours)
             
     except (ValueError, AttributeError):
         pass
@@ -263,6 +335,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     language = get_user_language(user_id)
     text = TEXTS[language]
     
+    await update.message.reply_text(
+        text['welcome'],
+        reply_markup=get_main_keyboard(language)
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    language = get_user_language(user_id)
+    text = TEXTS[language]
+    
+    await update.message.reply_text(
+        text['help_text'],
+        reply_markup=get_main_keyboard(language)
+    )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    language = get_user_language(user_id)
+    text = TEXTS[language]
+    context.user_data.clear()
     await update.message.reply_text(
         text['welcome'],
         reply_markup=get_main_keyboard(language)
@@ -280,11 +372,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await choose_category(update, context, 'query')
     elif message_text == text['add_todo']:
         await choose_category(update, context, 'add')
+    elif message_text == text['delete_todo']:
+        await choose_delete(update, context)
     elif message_text == text['change_language']:
         await change_language(update, context)
+    elif message_text == text['help']:
+        await help_command(update, context)
     else:
+        # Handle task input
+        if 'waiting_task' in context.user_data:
+            context.user_data['waiting_task'] = message_text
+            await update.message.reply_text(
+                text['need_reminder'],
+                reply_markup=get_reminder_keyboard(language)
+            )
+            del context.user_data['waiting_task']  # Move to callback if needed
         # Handle reminder time input
-        if 'waiting_reminder_time' in context.user_data:
+        elif 'waiting_reminder_time' in context.user_data:
             reminder_time = parse_reminder_time(message_text, language)
             if reminder_time:
                 category = context.user_data['waiting_category']
@@ -299,19 +403,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text['reminder_set'].format(reminder_time.strftime('%Y-%m-%d %H:%M')),
                     reply_markup=get_main_keyboard(language)
                 )
-                del context.user_data['waiting_reminder_time']
-                del context.user_data['waiting_category']
-                del context.user_data['waiting_task']
+                context.user_data.clear()
             else:
-                await update.message.reply_text(text['invalid_time'])
-        
-        # Handle task input
-        elif 'waiting_task' in context.user_data:
-            context.user_data['waiting_task'] = message_text
-            await update.message.reply_text(
-                text['need_reminder'],
-                reply_markup=get_reminder_keyboard(language)
-            )
+                await update.message.reply_text(
+                    text['invalid_time'] + '\n' + text['enter_reminder_time']
+                )
+                # Keep waiting for valid input
 
 async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -331,48 +428,54 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_keyboard(new_language)
         )
 
-    elif data.startswith('category_'):
-        category = data.split('_')[1]
-        if 'operation_type' in context.user_data:
-            operation_type = context.user_data['operation_type']
-            if operation_type == 'query':
-                await show_todos_by_category(query, context, category)
-            elif operation_type == 'add':
-                context.user_data['waiting_category'] = category
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=text['enter_task']
-                )
-            del context.user_data['operation_type']
+    elif data.startswith('add_category_'):
+        category = data.split('_')[2]
+        context.user_data['waiting_category'] = category
+        context.user_data['waiting_task'] = True
+        await query.edit_message_text(text['enter_task'])
+
+    elif data.startswith('query_category_'):
+        category = data.split('_')[2]
+        await show_todos_by_category(query, context, category)
 
     elif data.startswith('reminder_'):
+        if 'waiting_task' not in context.user_data or 'waiting_category' not in context.user_data:
+            await query.edit_message_text("❌ 操作已過期，請重新開始")
+            return
+
         if data == 'reminder_yes':
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=text['enter_reminder_time']
-            )
+            await query.edit_message_text(text['enter_reminder_time'])
             context.user_data['waiting_reminder_time'] = True
         else:
             category = context.user_data['waiting_category']
             task = context.user_data['waiting_task']
             add_todo_to_db(user_id, category, task)
+            await query.edit_message_text(text['task_added'])
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=text['task_added'],
                 reply_markup=get_main_keyboard(language)
             )
-            del context.user_data['waiting_category']
-            del context.user_data['waiting_task']
+            context.user_data.clear()
+
+    elif data.startswith('delete_'):
+        todo_id = int(data.split('_')[1])
+        if delete_todo(user_id, todo_id):
+            await query.edit_message_text(text['task_deleted'])
+        else:
+            await query.edit_message_text("❌ 刪除失敗")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            reply_markup=get_main_keyboard(language)
+        )
 
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
     
-    context.user_data['operation_type'] = operation_type
     await update.message.reply_text(
         text['choose_category'],
-        reply_markup=get_category_keyboard(language)
+        reply_markup=get_category_keyboard(language, operation_type)
     )
 
 async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,12 +489,12 @@ async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     message = text['all_tasks'] + '\n\n'
-    for i, (category, task, reminder_time) in enumerate(todos, 1):
+    for i, (_, category, task, reminder_time) in enumerate(todos, 1):
         category_name = CATEGORIES[category][language]
         reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {category_name}: {task}{reminder_text}\n"
     
-    await update.message.reply_text(message)
+    await update.message.reply_text(message, reply_markup=get_main_keyboard(language))
 
 async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, category):
     user_id = query.from_user.id
@@ -405,11 +508,26 @@ async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, cate
     
     category_name = CATEGORIES[category][language]
     message = text['tasks_in_category'].format(category_name) + '\n\n'
-    for i, (_, task, reminder_time) in enumerate(todos, 1):
+    for i, (_, _, task, reminder_time) in enumerate(todos, 1):
         reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {task}{reminder_text}\n"
     
     await query.edit_message_text(message)
+
+async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    language = get_user_language(user_id)
+    text = TEXTS[language]
+    
+    todos = get_todos(user_id)
+    if not todos:
+        await update.message.reply_text(text['no_tasks'])
+        return
+    
+    await update.message.reply_text(
+        text['choose_todo_delete'],
+        reply_markup=get_delete_keyboard(language, todos)
+    )
 
 async def change_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -426,7 +544,7 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
                 text=f"⏰ 提醒: {task}"
             )
         except Exception as e:
-            logger.error(f"Failed to send reminder: {e}")
+            logger.error(f"Failed to send reminder for todo_id {todo_id}: {e}")
 
     scheduler.add_job(
         send_reminder,
@@ -437,26 +555,72 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
 # 健康检查服务器类
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        logger.info(f"Received health check request: {self.path}")
         if self.path == '/health':
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(b'{"status": "ok", "service": "telegram-todo-bot"}')
+            response = json.dumps({"status": "ok", "service": "telegram-todo-bot"})
+            self.wfile.write(response.encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
+            logger.warning(f"Invalid health check path: {self.path}")
+
+def is_port_available(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('0.0.0.0', port)) != 0
 
 def run_health_server():
     """运行健康检查服务器"""
-    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
-    logger.info("Health check server started on port 10000")
+    port = 10000
+    if not is_port_available(port):
+        logger.error(f"Port {port} is already in use")
+        return
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Health check server started on port {port}")
     server.serve_forever()
+
+def check_env_vars():
+    if not TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable not set")
 
 def main():
     """Start the bot."""
-    if not TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
-        return
-    
-    if not DATABASE_URL:
-        logger.error("DATABASE_URL environment
+    try:
+        check_env_vars()
+        init_db_pool()
+        init_db()
+        logger.info("Database initialized successfully")
+        scheduler.start()
+        logger.info("Scheduler started successfully")
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
+        logger.info("Health check server started")
+        application = Application.builder().token(TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("cancel", cancel))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(callback_query))
+        
+        logger.info("Starting bot with polling mode...")
+        
+        # 使用Polling模式
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False
+        )
+    except Exception as e:
+        logger.critical(f"Bot startup failed: {e}")
+    finally:
+        scheduler.shutdown()
+        close_db_pool()
+
+if __name__ == '__main__':
+    main()
