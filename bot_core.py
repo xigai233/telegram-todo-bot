@@ -479,6 +479,14 @@ def add_todo_to_db(user_id, category, task, reminder_time=None):
     conn.commit()
     conn.close()
     return todo_id
+def get_db_connection():
+    """獲取PostgreSQL數據庫連接"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except psycopg2.Error as e:
+        logger.error(f"Database connection error: {e}")
+        raise
 def get_todos(user_id, category=None):
     conn = get_db_connection()
     c = conn.cursor()
