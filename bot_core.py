@@ -1,6 +1,3 @@
-我看到你的文件结构完全混乱了！有多个重复的 `main()` 函数和 `if __name__ == '__main__':` 块。让我给你提供完整的修复版本：
-
-```python
 import os
 import logging
 import json
