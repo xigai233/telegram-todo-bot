@@ -391,8 +391,19 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(callback_query))
     
-    # Start the Bot
-    application.run_polling()
+    # Use Webhook instead of Polling for Render deployment
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    webhook_url = os.environ.get('WEBHOOK_URL', f"https://your-render-app.onrender.com/{TOKEN}")
+    
+    # Start the Bot with Webhook
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TOKEN,
+        webhook_url=webhook_url,
+        drop_pending_updates=True
+    )
 
 if __name__ == '__main__':
     main()
