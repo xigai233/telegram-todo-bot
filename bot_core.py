@@ -1,6 +1,11 @@
+🔧 我將為你提供完整的房間功能代碼。讓我仔細檢查並整合所有功能：
+
+```python
 import os
 import logging
 import asyncio
+import random
+import hashlib
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -44,7 +49,18 @@ TEXTS = {
     'category_action': '⭐ 行動',
     'choose_todo_delete': '🗑️ 請選擇要刪除的待辦事項：',
     'task_deleted': '✅ 已刪除待辦事項',
-    'help_text': '📖 幫助：\n- 新增待辦：選擇類別 > 輸入內容\n- 查詢：查看所有或按類別\n- 刪除：選擇要刪除的項目'
+    'help_text': '📖 幫助：\n- 新增待辦：選擇類別 > 輸入內容\n- 查詢：查看所有或按類別\n- 刪除：選擇要刪除的項目',
+    'create_room': '🏠 創建房間',
+    'join_room': '🔑 加入房間',
+    'enter_room_name': '📛 請輸入房間名稱：',
+    'enter_room_password': '🔒 請設置房間密碼：',
+    'enter_room_code': '🔢 請輸入房間號碼：',
+    'enter_join_password': '🔐 請輸入房間密碼：',
+    'room_created': '✅ 房間創建成功！房間號：{}\n請分享給其他成員',
+    'join_success': '✅ 成功加入房間：{}',
+    'join_failed': '❌ 加入失敗：{}',
+    'not_in_room': '❌ 請先加入房間',
+    'room_notification': '📢 房間通知：{}'
 }
 
 # Categories
@@ -89,22 +105,145 @@ def close_db_pool():
         db_pool.closeall()
         logger.info("Database connection pool closed")
 
+# 房间管理功能
+def generate_room_code():
+    """生成4位数房间号"""
+    return str(random.randint(1000, 9999))
+
+def hash_password(password):
+    """密码哈希处理"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_room(room_name, password, owner_id):
+    """创建房间"""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        room_code = generate_room_code()
+      
+        # 确保房间号不重复
+        while True:
+            c.execute("SELECT room_code FROM rooms WHERE room_code = %s", (room_code,))
+            if not c.fetchone():
+                break
+            room_code = generate_room_code()
+      
+        hashed_password = hash_password(password)
+        c.execute("""
+            INSERT INTO rooms (room_code, room_name, password, owner_id)
+            VALUES (%s, %s, %s, %s)
+        """, (room_code, room_name, hashed_password, owner_id))
+      
+        # 自动将创建者加入房间
+        c.execute("""
+            INSERT INTO room_members (room_code, user_id)
+            VALUES (%s, %s)
+        """, (room_code, owner_id))
+      
+        conn.commit()
+        return room_code
+    except Exception as e:
+        logger.error(f"Error creating room: {e}")
+        raise
+    finally:
+        put_db_connection(conn)
+
+def join_room(room_code, password, user_id):
+    """加入房间"""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+      
+        # 验证房间和密码
+        c.execute("SELECT password, room_name FROM rooms WHERE room_code = %s", (room_code,))
+        result = c.fetchone()
+        if not result:
+            return False, "房間不存在"
+      
+        hashed_password, room_name = result
+        if hash_password(password) != hashed_password:
+            return False, "密碼錯誤"
+      
+        # 加入房间
+        try:
+            c.execute("""
+                INSERT INTO room_members (room_code, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT (room_code, user_id) DO NOTHING
+            """, (room_code, user_id))
+            conn.commit()
+            return True, room_name
+        except Exception as e:
+            logger.error(f"Error joining room: {e}")
+            return False, "加入失敗"
+          
+    except Exception as e:
+        logger.error(f"Error in join_room: {e}")
+        return False, "系統錯誤"
+    finally:
+        put_db_connection(conn)
+
+async def notify_room_members(room_code, message, context: ContextTypes.DEFAULT_TYPE):
+    """向房间所有成员发送通知"""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM room_members WHERE room_code = %s", (room_code,))
+        members = c.fetchall()
+      
+        for (user_id,) in members:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=TEXTS['room_notification'].format(message)
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify user {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error notifying room members: {e}")
+    finally:
+        put_db_connection(conn)
+
 # Database functions
 def init_db():
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
+      
+        # 用户表
         c.execute('''CREATE TABLE IF NOT EXISTS users
                      (user_id BIGINT PRIMARY KEY, 
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+      
+        # 房间表
+        c.execute('''CREATE TABLE IF NOT EXISTS rooms
+                     (room_code TEXT PRIMARY KEY,
+                      room_name TEXT,
+                      password TEXT,
+                      owner_id BIGINT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+      
+        # 房间成员表
+        c.execute('''CREATE TABLE IF NOT EXISTS room_members
+                     (id SERIAL PRIMARY KEY,
+                      room_code TEXT,
+                      user_id BIGINT,
+                      joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                      UNIQUE(room_code, user_id))''')
+      
+        # 待办表（添加房间关联）
         c.execute('''CREATE TABLE IF NOT EXISTS todos
                      (id SERIAL PRIMARY KEY, 
+                      room_code TEXT,
                       user_id BIGINT, 
                       category TEXT,
                       task TEXT, 
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY(room_code) REFERENCES rooms(room_code),
                       FOREIGN KEY(user_id) REFERENCES users(user_id))''')
+      
         conn.commit()
         logger.info("Database tables initialized successfully")
     except Exception as e:
@@ -113,23 +252,36 @@ def init_db():
     finally:
         put_db_connection(conn)
 
-def add_todo_to_db(user_id, category, task):
-    conn = None
+def add_todo_to_db(room_code, user_id, category, task, context: ContextTypes.DEFAULT_TYPE = None):
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         c = conn.cursor()
+      
+        # 确保用户存在
         c.execute("""
             INSERT INTO users (user_id) 
             VALUES (%s)
             ON CONFLICT (user_id) DO NOTHING
         """, (user_id,))
+      
+        # 添加待办
         c.execute("""
-            INSERT INTO todos (user_id, category, task) 
-            VALUES (%s, %s, %s)
+            INSERT INTO todos (room_code, user_id, category, task) 
+            VALUES (%s, %s, %s, %s)
             RETURNING id
-        """, (user_id, category, task))
+        """, (room_code, user_id, category, task))
+      
         todo_id = c.fetchone()[0]
         conn.commit()
+      
+        # 发送通知（如果提供了context）
+        if context:
+            asyncio.create_task(notify_room_members(
+                room_code, 
+                f"📝 新待辦事項添加：\n{task}\n類別：{category}",
+                context
+            ))
+      
         return todo_id
     except Exception as e:
         logger.error(f"Error adding todo: {e}")
@@ -137,25 +289,24 @@ def add_todo_to_db(user_id, category, task):
     finally:
         put_db_connection(conn)
 
-def get_todos(user_id, category=None):
-    conn = None
+def get_todos(room_code, category=None):
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         c = conn.cursor()
         if category:
             c.execute("""
-                SELECT id, category, task
+                SELECT id, user_id, category, task
                 FROM todos 
-                WHERE user_id = %s AND category = %s 
+                WHERE room_code = %s AND category = %s 
                 ORDER BY created_at
-            """, (user_id, category))
+            """, (room_code, category))
         else:
             c.execute("""
-                SELECT id, category, task
+                SELECT id, user_id, category, task
                 FROM todos 
-                WHERE user_id = %s 
+                WHERE room_code = %s 
                 ORDER BY created_at
-            """, (user_id,))
+            """, (room_code,))
         todos = c.fetchall()
         return todos
     except Exception as e:
@@ -164,17 +315,38 @@ def get_todos(user_id, category=None):
     finally:
         put_db_connection(conn)
 
-def delete_todo(user_id, todo_id):
-    conn = None
+def delete_todo(room_code, todo_id, context: ContextTypes.DEFAULT_TYPE = None):
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         c = conn.cursor()
+      
+        # 先获取待办信息用于通知
+        c.execute("SELECT task FROM todos WHERE id = %s AND room_code = %s", (todo_id, room_code))
+        result = c.fetchone()
+      
+        if not result:
+            return False
+      
+        task = result[0]
+      
+        # 删除待办
         c.execute("""
             DELETE FROM todos 
-            WHERE user_id = %s AND id = %s
-        """, (user_id, todo_id))
+            WHERE id = %s AND room_code = %s
+        """, (todo_id, room_code))
+      
         conn.commit()
-        return c.rowcount > 0
+        success = c.rowcount > 0
+      
+        # 发送通知（如果删除成功且提供了context）
+        if success and context:
+            asyncio.create_task(notify_room_members(
+                room_code, 
+                f"🗑️ 待辦事項已刪除：\n{task}",
+                context
+            ))
+      
+        return success
     except Exception as e:
         logger.error(f"Error deleting todo: {e}")
         return False
@@ -184,6 +356,7 @@ def delete_todo(user_id, todo_id):
 # Keyboard functions
 def get_main_keyboard():
     return ReplyKeyboardMarkup([
+        [TEXTS['create_room'], TEXTS['join_room']],
         [TEXTS['query_all'], TEXTS['query_category']],
         [TEXTS['add_todo'], TEXTS['delete_todo']],
         [TEXTS['help']]
@@ -197,7 +370,7 @@ def get_category_keyboard(operation_type):
 
 def get_delete_keyboard(todos):
     keyboard = []
-    for todo_id, _, task in todos:
+    for todo_id, _, _, task in todos:
         keyboard.append([InlineKeyboardButton(f"{task[:20]}...", callback_data=f'delete_{todo_id}')])
     return InlineKeyboardMarkup(keyboard)
 
@@ -218,21 +391,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     message_text = update.message.text
 
+    # 房间管理功能
+    if message_text == TEXTS['create_room']:
+        context.user_data['waiting_room_name'] = True
+        await update.message.reply_text(TEXTS['enter_room_name'])
+        return
+  
+    elif message_text == TEXTS['join_room']:
+        context.user_data['waiting_room_code'] = True
+        await update.message.reply_text(TEXTS['enter_room_code'])
+        return
+  
+    elif 'waiting_room_name' in context.user_data:
+        context.user_data['room_name'] = message_text
+        context.user_data['waiting_room_password'] = True
+        context.user_data.pop('waiting_room_name')
+        await update.message.reply_text(TEXTS['enter_room_password'])
+        return
+  
+    elif 'waiting_room_password' in context.user_data:
+        room_name = context.user_data['room_name']
+        password = message_text
+        room_code = create_room(room_name, password, user_id)
+        context.user_data.clear()
+        context.user_data['current_room'] = room_code
+        await update.message.reply_text(
+            TEXTS['room_created'].format(room_code),
+            reply_markup=get_main_keyboard()
+        )
+        return
+  
+    elif 'waiting_room_code' in context.user_data:
+        context.user_data['room_code'] = message_text
+        context.user_data['waiting_join_password'] = True
+        context.user_data.pop('waiting_room_code')
+        await update.message.reply_text(TEXTS['enter_join_password'])
+        return
+  
+    elif 'waiting_join_password' in context.user_data:
+        room_code = context.user_data['room_code']
+        password = message_text
+        success, message = join_room(room_code, password, user_id)
+        context.user_data.clear()
+      
+        if success:
+            context.user_data['current_room'] = room_code
+            await update.message.reply_text(
+                TEXTS['join_success'].format(message),
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                TEXTS['join_failed'].format(message),
+                reply_markup=get_main_keyboard()
+            )
+        return
+
+    # 原有功能（需要检查是否在房间中）
+    if 'current_room' not in context.user_data:
+        if message_text in [TEXTS['query_all'], TEXTS['query_category'], TEXTS['add_todo'], TEXTS['delete_todo']]:
+            await update.message.reply_text(TEXTS['not_in_room'])
+            return
+  
+    room_code = context.user_data.get('current_room')
+  
     if message_text == TEXTS['query_all']:
-        await query_all_todos(update, context)
+        await query_all_todos(update, context, room_code)
     elif message_text == TEXTS['query_category']:
         await choose_category(update, context, 'query')
     elif message_text == TEXTS['add_todo']:
         await choose_category(update, context, 'add')
     elif message_text == TEXTS['delete_todo']:
-        await choose_delete(update, context)
+        await choose_delete(update, context, room_code)
     elif message_text == TEXTS['help']:
         await help_command(update, context)
     else:
         if 'waiting_task' in context.user_data:
             category = context.user_data['waiting_category']
             task = message_text
-            add_todo_to_db(user_id, category, task)
+            add_todo_to_db(room_code, user_id, category, task, context)
             await update.message.reply_text(
                 TEXTS['task_added'],
                 reply_markup=get_main_keyboard()
@@ -243,6 +480,12 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+  
+    if 'current_room' not in context.user_data:
+        await query.edit_message_text(TEXTS['not_in_room'])
+        return
+  
+    room_code = context.user_data['current_room']
     data = query.data
 
     if data.startswith('add_category_'):
@@ -252,10 +495,10 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(TEXTS['enter_task'])
     elif data.startswith('query_category_'):
         category = data.split('_')[2]
-        await show_todos_by_category(query, context, category)
+        await show_todos_by_category(query, context, room_code, category)
     elif data.startswith('delete_'):
         todo_id = int(data.split('_')[1])
-        if delete_todo(user_id, todo_id):
+        if delete_todo(room_code, todo_id, context):
             await query.edit_message_text(TEXTS['task_deleted'])
         else:
             await query.edit_message_text("❌ 刪除失敗")
@@ -270,36 +513,38 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, op
         reply_markup=get_category_keyboard(operation_type)
     )
 
-async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    todos = get_todos(user_id)
+async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
+    todos = get_todos(room_code)
     if not todos:
         await update.message.reply_text(TEXTS['no_tasks'])
         return
+    
     message = TEXTS['all_tasks'] + '\n\n'
-    for i, (_, category, task) in enumerate(todos, 1):
+    for i, (_, user_id, category, task) in enumerate(todos, 1):
         category_name = CATEGORIES[category]
         message += f"{i}. {category_name}: {task}\n"
+    
     await update.message.reply_text(message, reply_markup=get_main_keyboard())
 
-async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, category):
-    user_id = query.from_user.id
-    todos = get_todos(user_id, category)
+async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, room_code, category):
+    todos = get_todos(room_code, category)
     if not todos:
         await query.edit_message_text(TEXTS['no_tasks'])
         return
+    
     category_name = CATEGORIES[category]
     message = TEXTS['tasks_in_category'].format(category_name) + '\n\n'
-    for i, (_, _, task) in enumerate(todos, 1):
+    for i, (_, _, _, task) in enumerate(todos, 1):
         message += f"{i}. {task}\n"
+    
     await query.edit_message_text(message)
 
-async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    todos = get_todos(user_id)
+async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
+    todos = get_todos(room_code)
     if not todos:
         await update.message.reply_text(TEXTS['no_tasks'])
         return
+    
     await update.message.reply_text(
         TEXTS['choose_todo_delete'],
         reply_markup=get_delete_keyboard(todos)
@@ -336,6 +581,5 @@ def main():
         close_db_pool()
 
 if __name__ == '__main__':
-    # 直接調用同步的 main 函數
+    # 直接调用同步的 main 函数
     main()
-
