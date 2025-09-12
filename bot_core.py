@@ -553,6 +553,42 @@ def check_env_vars():
         raise ValueError("DATABASE_URL environment variable not set")
 
 async def main():
+    try:
+        check_env_vars()
+        init_db_pool()
+        init_db()
+        scheduler.start()
+        
+        # 启动健康检查服务器
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
+        
+        application = Application.builder().token(TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("cancel", cancel))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(callback_query))
+        
+        logger.info("Starting bot with polling mode...")
+        
+        # 使用正确的异步上下文管理器
+        async with application:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.run_polling()
+            
+    except Exception as e:
+        logger.error(f"Bot startup failed: {e}")
+        raise
+    finally:
+        if scheduler.running:
+            scheduler.shutdown()
+        close_db_pool()
+
+if __name__ == '__main__':
+    # 使用现代的事件循环启动方式
+    asyncio.run(main())
+
     application = None
     try:
         check_env_vars()
