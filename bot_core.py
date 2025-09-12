@@ -24,12 +24,13 @@ logger = logging.getLogger(__name__)
 # 环境变量
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
+PORT = int(os.getenv('PORT', 8443))  # Render 设置的端口，默认 8443 用于 webhook
 
 # 全局连接池和调度器
 db_pool = None
 scheduler = AsyncIOScheduler()
 
-# Language texts
+# Language texts (unchanged)
 TEXTS = {
     'zh': {
         'welcome': '👋 歡迎使用待辦事項機器人！\n使用 /help 查看幫助',
@@ -87,14 +88,14 @@ TEXTS = {
     }
 }
 
-# Categories
+# Categories (unchanged)
 CATEGORIES = {
     'game': {'zh': '🎮 遊戲', 'en': '🎮 Games'},
     'movie': {'zh': '📺 影視', 'en': '📺 Movies'},
     'action': {'zh': '⭐ 行動', 'en': '⭐ Actions'}
 }
 
-# 初始化数据库连接池
+# 初始化数据库连接池 (unchanged)
 def init_db_pool():
     global db_pool
     try:
@@ -129,7 +130,7 @@ def close_db_pool():
         db_pool.closeall()
         logger.info("Database connection pool closed")
 
-# Database functions
+# Database functions (unchanged, with added logging for debug)
 def init_db():
     """初始化數據庫表結構"""
     conn = None
@@ -189,6 +190,7 @@ def set_user_language(user_id, language):
             DO UPDATE SET language = EXCLUDED.language
         """, (user_id, language))
         conn.commit()
+        logger.debug(f"Set language for user {user_id} to {language}")
     except Exception as e:
         logger.error(f"Error setting user language: {e}")
         raise
@@ -215,6 +217,7 @@ def add_todo_to_db(user_id, category, task, reminder_time=None):
         """, (user_id, category, task, reminder_time))
         todo_id = c.fetchone()[0]
         conn.commit()
+        logger.debug(f"Added todo {todo_id} for user {user_id}: {task}")
         return todo_id
     except Exception as e:
         logger.error(f"Error adding todo: {e}")
@@ -243,6 +246,7 @@ def get_todos(user_id, category=None):
                 ORDER BY created_at
             """, (user_id,))
         todos = c.fetchall()
+        logger.debug(f"Retrieved {len(todos)} todos for user {user_id}")
         return todos
     except Exception as e:
         logger.error(f"Error getting todos: {e}")
@@ -261,14 +265,16 @@ def delete_todo(user_id, todo_id):
             WHERE user_id = %s AND id = %s
         """, (user_id, todo_id))
         conn.commit()
-        return c.rowcount > 0
+        deleted = c.rowcount > 0
+        logger.debug(f"Deleted todo {todo_id} for user {user_id}: {deleted}")
+        return deleted
     except Exception as e:
         logger.error(f"Error deleting todo: {e}")
         return False
     finally:
         put_db_connection(conn)
 
-# Keyboard functions
+# Keyboard functions (unchanged)
 def get_main_keyboard(language):
     text = TEXTS[language]
     return ReplyKeyboardMarkup([
@@ -302,7 +308,7 @@ def get_delete_keyboard(language, todos):
         keyboard.append([InlineKeyboardButton(f"{task[:20]}...", callback_data=f'delete_{todo_id}')])
     return InlineKeyboardMarkup(keyboard)
 
-# Time parsing function
+# Time parsing function (unchanged)
 def parse_reminder_time(time_str, language):
     try:
         time_str = time_str.lower().strip()
@@ -329,7 +335,7 @@ def parse_reminder_time(time_str, language):
         pass
     return None
 
-# Handlers
+# Handlers (unchanged except for error handling)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
@@ -386,7 +392,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text['need_reminder'],
                 reply_markup=get_reminder_keyboard(language)
             )
-            del context.user_data['waiting_task']  # Move to callback if needed
+            # Removed erroneous del here - state is cleared in callback or after time input
         # Handle reminder time input
         elif 'waiting_reminder_time' in context.user_data:
             reminder_time = parse_reminder_time(message_text, language)
@@ -453,6 +459,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text['task_added'])
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
+                text=text['main_menu'],
                 reply_markup=get_main_keyboard(language)
             )
             context.user_data.clear()
@@ -552,7 +559,7 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
         id=f"reminder_{todo_id}_{user_id}"
     )
 
-# 健康检查服务器类
+# 健康检查服务器类 (unchanged)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         logger.info(f"Received health check request: {self.path}")
@@ -587,8 +594,8 @@ def check_env_vars():
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable not set")
 
-def main():
-    """Start the bot."""
+async def main():
+    """Start the bot with webhook."""
     try:
         check_env_vars()
         init_db_pool()
@@ -599,6 +606,8 @@ def main():
         health_thread = threading.Thread(target=run_health_server, daemon=True)
         health_thread.start()
         logger.info("Health check server started")
+        
+        # Create the Application
         application = Application.builder().token(TOKEN).build()
         
         # Add handlers
@@ -608,19 +617,32 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(callback_query))
         
-        logger.info("Starting bot with polling mode...")
+        # Set webhook (Render provides RENDER_EXTERNAL_HOSTNAME)
+        external_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+        if not external_hostname:
+            raise ValueError("RENDER_EXTERNAL_HOSTNAME not set - required for webhook")
         
-        # 使用Polling模式
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False
+        webhook_url = f"https://{external_hostname}/{TOKEN}"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
+        
+        # Start webhook server
+        await application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=webhook_url
         )
+        
+    except telegram.error.Conflict as e:
+        logger.critical(f"Telegram conflict error: {e}. Ensure single instance and no polling conflicts.")
+        # Optional retry logic or shutdown
     except Exception as e:
         logger.critical(f"Bot startup failed: {e}")
     finally:
         scheduler.shutdown()
         close_db_pool()
+        logger.info("Bot stopped")
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
