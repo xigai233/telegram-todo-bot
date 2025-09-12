@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: telegram-todo-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_core.py
+    envVars:
+      - key: TOKEN
+        fromSecret: TELEGRAM_BOT_TOKEN
