@@ -1,10 +1,10 @@
 import os
 import logging
 import json
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -524,6 +524,15 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+    
+    def do_HEAD(self):
+        logger.info(f"Received health check HEAD request: {self.path}")
+        if self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def is_port_available(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -545,6 +554,9 @@ def check_env_vars():
         raise ValueError("DATABASE_URL environment variable not set")
 
 async def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    application = None
     try:
         check_env_vars()
         init_db_pool()
@@ -571,11 +583,19 @@ async def main():
         )
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
-        await application.shutdown()  # 确保正确关闭
+        if application:
+            await application.shutdown()
         raise
     finally:
         scheduler.shutdown()
         close_db_pool()
+        if not loop.is_closed():
+            loop.close()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main_loop = asyncio.get_event_loop()
+    if main_loop.is_running():
+        logger.warning("Main loop is already running, creating a new one")
+        main_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(main_loop)
+    main_loop.run_until_complete(main())
