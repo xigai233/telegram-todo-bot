@@ -393,6 +393,45 @@ def main():
     
     # Use Webhook instead of Polling for Render deployment
     import os
+    port = int(os.environ.get('PORT', 10000))  # Render使用10000端口
+    webhook_url = os.environ.get('WEBHOOK_URL')
+    
+    if not webhook_url:
+        # 自動生成webhook URL
+        webhook_url = f"https://todobot-tg4h.onrender.com/{TOKEN}"
+    
+    logger.info(f"Starting webhook on port {port} with URL: {webhook_url}")
+    
+    # Start the Bot with Webhook
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TOKEN,
+        webhook_url=webhook_url,
+        drop_pending_updates=True
+    )
+
+    """Start the bot."""
+    if not TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
+        return
+    
+    # Initialize database
+    init_db()
+    
+    # Start scheduler
+    scheduler.start()
+    
+    # Create the Application
+    application = Application.builder().token(TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(callback_query))
+    
+    # Use Webhook instead of Polling for Render deployment
+    import os
     port = int(os.environ.get('PORT', 5000))
     webhook_url = os.environ.get('WEBHOOK_URL', f"https://your-render-app.onrender.com/{TOKEN}")
     
