@@ -1,6 +1,3 @@
-🔧 我將為你提供完整的房間功能代碼。讓我仔細檢查並整合所有功能：
-
-```python
 import os
 import logging
 import asyncio
