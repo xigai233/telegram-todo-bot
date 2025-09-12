@@ -1,6 +1,5 @@
 import os
 import logging
-import sqlite3
 import json
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,8 +19,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get bot token from environment variable
+# Get environment variables
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Global scheduler for reminders
 scheduler = AsyncIOScheduler()
@@ -81,62 +81,129 @@ CATEGORIES = {
     'action': {'zh': '⭐ 行動', 'en': '⭐ Actions'}
 }
 
-# Database functions
+# Database connection function
+def get_db_connection():
+    """獲取PostgreSQL數據庫連接"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        return conn
+    except psycopg2.Error as e:
+        logger.error(f"Database connection error: {e}")
+        raise
+
+# Database functions - PostgreSQL only
 def init_db():
-    conn = sqlite3.connect('todo_bot.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, language TEXT DEFAULT 'zh', 
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS todos
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  user_id INTEGER, 
-                  category TEXT,
-                  task TEXT, 
-                  reminder_time TIMESTAMP NULL,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY(user_id) REFERENCES users(user_id))''')
-    conn.commit()
-    conn.close()
+    """初始化數據庫表結構"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # 創建users表
+        c.execute('''CREATE TABLE IF NOT EXISTS users
+                     (user_id BIGINT PRIMARY KEY, 
+                      language TEXT DEFAULT 'zh', 
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # 創建todos表
+        c.execute('''CREATE TABLE IF NOT EXISTS todos
+                     (id SERIAL PRIMARY KEY, 
+                      user_id BIGINT, 
+                      category TEXT,
+                      task TEXT, 
+                      reminder_time TIMESTAMP NULL,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY(user_id) REFERENCES users(user_id))''')
+        
+        conn.commit()
+        logger.info("Database tables initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def get_user_language(user_id):
-    conn = sqlite3.connect('todo_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else 'zh'
+    """獲取用戶語言設置"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT language FROM users WHERE user_id = %s", (user_id,))
+        result = c.fetchone()
+        return result[0] if result else 'zh'
+    except Exception as e:
+        logger.error(f"Error getting user language: {e}")
+        return 'zh'
+    finally:
+        if conn:
+            conn.close()
 
 def set_user_language(user_id, language):
-    conn = sqlite3.connect('todo_bot.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, language) VALUES (?, ?)", 
-              (user_id, language))
-    conn.commit()
-    conn.close()
+    """設置用戶語言"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO users (user_id, language) 
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET language = EXCLUDED.language
+        """, (user_id, language))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error setting user language: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def add_todo_to_db(user_id, category, task, reminder_time=None):
-    conn = sqlite3.connect('todo_bot.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO todos (user_id, category, task, reminder_time) VALUES (?, ?, ?, ?)",
-              (user_id, category, task, reminder_time))
-    conn.commit()
-    todo_id = c.lastrowid
-    conn.close()
-    return todo_id
+    """添加待辦事項到數據庫"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO todos (user_id, category, task, reminder_time) 
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """, (user_id, category, task, reminder_time))
+        todo_id = c.fetchone()[0]
+        conn.commit()
+        return todo_id
+    except Exception as e:
+        logger.error(f"Error adding todo: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def get_todos(user_id, category=None):
-    conn = sqlite3.connect('todo_bot.db')
-    c = conn.cursor()
-    if category:
-        c.execute("SELECT category, task, reminder_time FROM todos WHERE user_id = ? AND category = ? ORDER BY created_at", 
-                  (user_id, category))
-    else:
-        c.execute("SELECT category, task, reminder_time FROM todos WHERE user_id = ? ORDER BY created_at", 
-                  (user_id,))
-    todos = c.fetchall()
-    conn.close()
-    return todos
+    """獲取待辦事項列表"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        if category:
+            c.execute("""
+                SELECT category, task, reminder_time 
+                FROM todos 
+                WHERE user_id = %s AND category = %s 
+                ORDER BY created_at
+            """, (user_id, category))
+        else:
+            c.execute("""
+                SELECT category, task, reminder_time 
+                FROM todos 
+                WHERE user_id = %s 
+                ORDER BY created_at
+            """, (user_id,))
+        todos = c.fetchall()
+        return todos
+    except Exception as e:
+        logger.error(f"Error getting todos: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
 
 # Keyboard functions
 def get_main_keyboard(language):
@@ -321,7 +388,7 @@ async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = text['all_tasks'] + '\n\n'
     for i, (category, task, reminder_time) in enumerate(todos, 1):
         category_name = CATEGORIES[category][language]
-        reminder_text = f" ⏰ {reminder_time}" if reminder_time else ""
+        reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {category_name}: {task}{reminder_text}\n"
     
     await update.message.reply_text(message)
@@ -339,7 +406,7 @@ async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, cate
     category_name = CATEGORIES[category][language]
     message = text['tasks_in_category'].format(category_name) + '\n\n'
     for i, (_, task, reminder_time) in enumerate(todos, 1):
-        reminder_text = f" ⏰ {reminder_time}" if reminder_time else ""
+        reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {task}{reminder_text}\n"
     
     await query.edit_message_text(message)
@@ -354,10 +421,9 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
     async def send_reminder():
         try:
             language = get_user_language(user_id)
-            text = TEXTS[language]
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"⏰ 提醒: {task}\n{text['category_' + context.user_data.get('waiting_category', '')]}"
+                text=f"⏰ 提醒: {task}"
             )
         except Exception as e:
             logger.error(f"Failed to send reminder: {e}")
@@ -365,7 +431,7 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
     scheduler.add_job(
         send_reminder,
         trigger=DateTrigger(run_date=reminder_time),
-        id=f"reminder_{todo_id}"
+        id=f"reminder_{todo_id}_{user_id}"
     )
 
 # 健康检查服务器类
@@ -392,121 +458,5 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
         return
     
-    # Initialize database
-    init_db()
-    
-    # Start scheduler
-    scheduler.start()
-    
-    # 启动健康检查服务器（在单独线程中）
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
-    
-    # Create the Application
-    application = Application.builder().token(TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(callback_query))
-    
-    logger.info("Starting bot with polling mode...")
-    
-    # 使用Polling模式（Render免费版兼容）
-    try:
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False
-        )
-    except Exception as e:
-        logger.error(f"Polling error: {e}")
-DATABASE_URL = os.getenv('DATABASE_URL')
-def get_db_connection():
-    """獲取PostgreSQL數據庫連接"""
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
-def init_db():
-    """初始化數據庫表結構"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    # 創建users表
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id BIGINT PRIMARY KEY, 
-                  language TEXT DEFAULT 'zh', 
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # 創建todos表
-    c.execute('''CREATE TABLE IF NOT EXISTS todos
-                 (id SERIAL PRIMARY KEY, 
-                  user_id BIGINT, 
-                  category TEXT,
-                  task TEXT, 
-                  reminder_time TIMESTAMP NULL,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY(user_id) REFERENCES users(user_id))''')
-    
-    conn.commit()
-    conn.close()
-def get_user_language(user_id):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT language FROM users WHERE user_id = %s", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else 'zh'
-def set_user_language(user_id, language):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO users (user_id, language) 
-        VALUES (%s, %s)
-        ON CONFLICT (user_id) 
-        DO UPDATE SET language = EXCLUDED.language
-    """, (user_id, language))
-    conn.commit()
-    conn.close()
-def add_todo_to_db(user_id, category, task, reminder_time=None):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO todos (user_id, category, task, reminder_time) 
-        VALUES (%s, %s, %s, %s)
-        RETURNING id
-    """, (user_id, category, task, reminder_time))
-    todo_id = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return todo_id
-def get_db_connection():
-    """獲取PostgreSQL數據庫連接"""
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except psycopg2.Error as e:
-        logger.error(f"Database connection error: {e}")
-        raise
-def get_todos(user_id, category=None):
-    conn = get_db_connection()
-    c = conn.cursor()
-    if category:
-        c.execute("""
-            SELECT category, task, reminder_time 
-            FROM todos 
-            WHERE user_id = %s AND category = %s 
-            ORDER BY created_at
-        """, (user_id, category))
-    else:
-        c.execute("""
-            SELECT category, task, reminder_time 
-            FROM todos 
-            WHERE user_id = %s 
-            ORDER BY created_at
-        """, (user_id,))
-    todos = c.fetchall()
-    conn.close()
-    return todos
-
-if __name__ == '__main__':
-    main()
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL environment

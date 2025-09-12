@@ -2,3 +2,4 @@ python-telegram-bot==20.7
 python-dateutil==2.8.2
 apscheduler==3.10.4
 psycopg2-binary==2.9.9
+httpx==0.25.2
