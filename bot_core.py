@@ -8,6 +8,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # Enable logging
 logging.basicConfig(
@@ -364,12 +366,23 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
         id=f"reminder_{todo_id}"
     )
 
-async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    language = get_user_language(user_id)
-    text = TEXTS[language]
-    
-    await update.message.reply_text(text['enter_reminder_time'])
+# 健康检查服务器类
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status": "ok", "service": "telegram-todo-bot"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_health_server():
+    """运行健康检查服务器"""
+    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+    logger.info("Health check server started on port 10000")
+    server.serve_forever()
 
 def main():
     """Start the bot."""
@@ -383,6 +396,10 @@ def main():
     # Start scheduler
     scheduler.start()
     
+    # 启动健康检查服务器（在单独线程中）
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    
     # Create the Application
     application = Application.builder().token(TOKEN).build()
     
@@ -391,24 +408,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(callback_query))
     
-    # 添加健康检查端点（用于Render）
-    from flask import Flask, request, jsonify
-    import threading
-    
-    app = Flask(__name__)
-    
-    @app.route('/health')
-    def health_check():
-        return jsonify({"status": "healthy", "service": "telegram-todo-bot"})
-    
-    # 在单独线程中运行Flask健康检查
-    def run_flask():
-        app.run(host='0.0.0.0', port=10000, debug=False)
-    
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    logger.info("Health check server started on port 10000")
+    logger.info("Starting bot with polling mode...")
     
     # 使用Polling模式（Render免费版兼容）
     try:
@@ -419,80 +419,6 @@ def main():
         )
     except Exception as e:
         logger.error(f"Polling error: {e}")
-        # 保持健康检查运行
-        flask_thread.join()
-
-    """Start the bot."""
-    if not TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
-        return
-    
-    # Initialize database
-    init_db()
-    
-    # Start scheduler
-    scheduler.start()
-    
-    # Create the Application
-    application = Application.builder().token(TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(callback_query))
-    
-    # Use Webhook instead of Polling for Render deployment
-    import os
-    port = int(os.environ.get('PORT', 10000))  # Render使用10000端口
-    webhook_url = os.environ.get('WEBHOOK_URL')
-    
-    if not webhook_url:
-        # 自動生成webhook URL
-        webhook_url = f"https://todobot-tg4h.onrender.com/{TOKEN}"
-    
-    logger.info(f"Starting webhook on port {port} with URL: {webhook_url}")
-    
-    # Start the Bot with Webhook
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TOKEN,
-        webhook_url=webhook_url,
-        drop_pending_updates=True
-    )
-
-    """Start the bot."""
-    if not TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
-        return
-    
-    # Initialize database
-    init_db()
-    
-    # Start scheduler
-    scheduler.start()
-    
-    # Create the Application
-    application = Application.builder().token(TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(callback_query))
-    
-    # Use Webhook instead of Polling for Render deployment
-    import os
-    port = int(os.environ.get('PORT', 5000))
-    webhook_url = os.environ.get('WEBHOOK_URL', f"https://your-render-app.onrender.com/{TOKEN}")
-    
-    # Start the Bot with Webhook
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TOKEN,
-        webhook_url=webhook_url,
-        drop_pending_updates=True
-    )
 
 if __name__ == '__main__':
     main()
