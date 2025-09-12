@@ -391,6 +391,56 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(callback_query))
     
+    # 添加健康检查端点（用于Render）
+    from flask import Flask, request, jsonify
+    import threading
+    
+    app = Flask(__name__)
+    
+    @app.route('/health')
+    def health_check():
+        return jsonify({"status": "healthy", "service": "telegram-todo-bot"})
+    
+    # 在单独线程中运行Flask健康检查
+    def run_flask():
+        app.run(host='0.0.0.0', port=10000, debug=False)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    logger.info("Health check server started on port 10000")
+    
+    # 使用Polling模式（Render免费版兼容）
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False
+        )
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+        # 保持健康检查运行
+        flask_thread.join()
+
+    """Start the bot."""
+    if not TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
+        return
+    
+    # Initialize database
+    init_db()
+    
+    # Start scheduler
+    scheduler.start()
+    
+    # Create the Application
+    application = Application.builder().token(TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(callback_query))
+    
     # Use Webhook instead of Polling for Render deployment
     import os
     port = int(os.environ.get('PORT', 10000))  # Render使用10000端口
