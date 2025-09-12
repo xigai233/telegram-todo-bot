@@ -1,3 +1,145 @@
+您的部署遇到了两个主要问题：
+
+1. **事件循环冲突** - `Cannot close a running event loop`
+2. **数据库迁移失败** - `INSERT has more expressions than target columns`
+
+让我为您提供一个修复方案：
+
+## 问题1：事件循环冲突修复
+
+在 `bot_core.py` 的 `main()` 函数中，将异步调用改为同步：
+
+```python
+def main():
+    application = None
+    try:
+        check_env_vars()
+        init_db_pool()
+        init_db()
+      
+        application = Application.builder().token(TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(callback_query))
+      
+        logger.info("Starting bot with polling mode...")
+      
+        # 使用同步的 run_polling 方法
+        application.run_polling()
+          
+    except Exception as e:
+        logger.error(f"Bot startup failed: {e}")
+        raise
+    finally:
+        close_db_pool()
+```
+
+## 问题2：数据库迁移修复
+
+修改 `migrate_database()` 函数，正确处理列不匹配的问题：
+
+```python
+def migrate_database():
+    """自動遷移數據庫結構"""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+    
+        # 1. 首先創建rooms表（如果不存在）
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS rooms (
+                room_code TEXT PRIMARY KEY,
+                room_name TEXT,
+                password TEXT,
+                owner_id BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+    
+        # 2. 創建room_members表（如果不存在）
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS room_members (
+                id SERIAL PRIMARY KEY,
+                room_code TEXT,
+                user_id BIGINT,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                UNIQUE(room_code, user_id)
+            )
+        ''')
+    
+        # 3. 檢查todos表是否有room_code列
+        c.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'todos' AND column_name = 'room_code'
+        """)
+        has_room_code = c.fetchone()
+    
+        if not has_room_code:
+            logger.info("檢測到舊數據庫結構，開始遷移...")
+        
+            # 4. 檢查舊表的結構
+            c.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'todos' 
+                ORDER BY ordinal_position
+            """)
+            old_columns = c.fetchall()
+            logger.info(f"舊表結構: {old_columns}")
+        
+            # 5. 創建新表結構（包含room_code）
+            c.execute('''
+                CREATE TABLE todos_new (
+                    id SERIAL PRIMARY KEY, 
+                    room_code TEXT DEFAULT 'default_room',
+                    user_id BIGINT, 
+                    category TEXT,
+                    task TEXT, 
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            ''')
+        
+            # 6. 創建默認房間用於遷移數據
+            c.execute("""
+                INSERT INTO rooms (room_code, room_name, password, owner_id)
+                VALUES ('default_room', '默認房間', %s, 0)
+                ON CONFLICT (room_code) DO NOTHING
+            """, (hash_password('default'),))
+        
+            # 7. 遷移數據 - 明確指定列名
+            c.execute("""
+                INSERT INTO todos_new (user_id, category, task, created_at)
+                SELECT user_id, category, task, created_at FROM todos
+            """)
+        
+            # 8. 刪除舊表並重命名新表
+            c.execute("DROP TABLE todos")
+            c.execute("ALTER TABLE todos_new RENAME TO todos")
+        
+            logger.info("數據庫遷移完成")
+        else:
+            logger.info("數據庫結構已是最新")
+        
+        conn.commit()
+    
+    except Exception as e:
+        logger.error(f"數據庫遷移失敗: {e}")
+        conn.rollback()
+        raise
+    finally:
+        put_db_connection(conn)
+```
+
+## 完整的修复方案
+
+创建一个新的 `bot_core_fixed.py` 文件，包含以下完整修复：
+
+```python
 import os
 import logging
 import asyncio
@@ -117,26 +259,26 @@ def create_room(room_name, password, owner_id):
     try:
         c = conn.cursor()
         room_code = generate_room_code()
-      
+    
         # 确保房间号不重复
         while True:
             c.execute("SELECT room_code FROM rooms WHERE room_code = %s", (room_code,))
             if not c.fetchone():
                 break
             room_code = generate_room_code()
-      
+    
         hashed_password = hash_password(password)
         c.execute("""
             INSERT INTO rooms (room_code, room_name, password, owner_id)
             VALUES (%s, %s, %s, %s)
         """, (room_code, room_name, hashed_password, owner_id))
-      
+    
         # 自动将创建者加入房间
         c.execute("""
             INSERT INTO room_members (room_code, user_id)
             VALUES (%s, %s)
         """, (room_code, owner_id))
-      
+    
         conn.commit()
         return room_code
     except Exception as e:
@@ -150,17 +292,17 @@ def join_room(room_code, password, user_id):
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 验证房间和密码
         c.execute("SELECT password, room_name FROM rooms WHERE room_code = %s", (room_code,))
         result = c.fetchone()
         if not result:
             return False, "房間不存在"
-      
+    
         hashed_password, room_name = result
         if hash_password(password) != hashed_password:
             return False, "密碼錯誤"
-      
+    
         # 加入房间
         try:
             c.execute("""
@@ -173,7 +315,7 @@ def join_room(room_code, password, user_id):
         except Exception as e:
             logger.error(f"Error joining room: {e}")
             return False, "加入失敗"
-          
+        
     except Exception as e:
         logger.error(f"Error in join_room: {e}")
         return False, "系統錯誤"
@@ -187,7 +329,7 @@ async def notify_room_members(room_code, message, context: ContextTypes.DEFAULT_
         c = conn.cursor()
         c.execute("SELECT user_id FROM room_members WHERE room_code = %s", (room_code,))
         members = c.fetchall()
-      
+    
         for (user_id,) in members:
             try:
                 await context.bot.send_message(
@@ -206,7 +348,7 @@ def migrate_database():
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 1. 首先創建rooms表（如果不存在）
         c.execute('''
             CREATE TABLE IF NOT EXISTS rooms (
@@ -217,7 +359,7 @@ def migrate_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-      
+    
         # 2. 創建room_members表（如果不存在）
         c.execute('''
             CREATE TABLE IF NOT EXISTS room_members (
@@ -229,7 +371,7 @@ def migrate_database():
                 UNIQUE(room_code, user_id)
             )
         ''')
-      
+    
         # 3. 檢查todos表是否有room_code列
         c.execute("""
             SELECT column_name 
@@ -237,30 +379,23 @@ def migrate_database():
             WHERE table_name = 'todos' AND column_name = 'room_code'
         """)
         has_room_code = c.fetchone()
-      
+    
         if not has_room_code:
             logger.info("檢測到舊數據庫結構，開始遷移...")
-          
-            # 4. 創建臨時備份表
+        
+            # 4. 檢查舊表的結構
+            c.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'todos' 
+                ORDER BY ordinal_position
+            """)
+            old_columns = c.fetchall()
+            logger.info(f"舊表結構: {old_columns}")
+        
+            # 5. 創建新表結構（包含room_code）
             c.execute('''
-                CREATE TABLE IF NOT EXISTS todos_backup (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    category TEXT,
-                    task TEXT,
-                    created_at TIMESTAMP
-                )
-            ''')
-          
-            # 5. 備份現有數據
-            c.execute("INSERT INTO todos_backup SELECT * FROM todos")
-          
-            # 6. 刪除舊表
-            c.execute("DROP TABLE IF EXISTS todos CASCADE")
-          
-            # 7. 創建新表結構
-            c.execute('''
-                CREATE TABLE todos (
+                CREATE TABLE todos_new (
                     id SERIAL PRIMARY KEY, 
                     room_code TEXT DEFAULT 'default_room',
                     user_id BIGINT, 
@@ -271,20 +406,30 @@ def migrate_database():
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
-          
-            # 8. 創建默認房間用於遷移數據
+        
+            # 6. 創建默認房間用於遷移數據
             c.execute("""
                 INSERT INTO rooms (room_code, room_name, password, owner_id)
                 VALUES ('default_room', '默認房間', %s, 0)
                 ON CONFLICT (room_code) DO NOTHING
             """, (hash_password('default'),))
-          
+        
+            # 7. 遷移數據 - 明確指定列名
+            c.execute("""
+                INSERT INTO todos_new (user_id, category, task, created_at)
+                SELECT user_id, category, task, created_at FROM todos
+            """)
+        
+            # 8. 刪除舊表並重命名新表
+            c.execute("DROP TABLE todos")
+            c.execute("ALTER TABLE todos_new RENAME TO todos")
+        
             logger.info("數據庫遷移完成")
         else:
             logger.info("數據庫結構已是最新")
-          
+        
         conn.commit()
-      
+    
     except Exception as e:
         logger.error(f"數據庫遷移失敗: {e}")
         conn.rollback()
@@ -299,7 +444,7 @@ def init_db():
     try:
         conn = get_db_connection()
         c = conn.cursor()
-      
+    
         # 創建用戶表（必須最先創建）
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -307,13 +452,13 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-      
+    
         conn.commit()
         logger.info("基礎用戶表初始化成功")
-      
+    
         # 執行自動遷移
         migrate_database()
-      
+    
     except Exception as e:
         logger.critical(f"數據庫初始化失敗: {e}")
         raise
@@ -324,18 +469,18 @@ def add_todo_to_db(room_code, user_id, category, task, context: ContextTypes.DEF
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 確保用戶存在
         c.execute("""
             INSERT INTO users (user_id) 
             VALUES (%s)
             ON CONFLICT (user_id) DO NOTHING
         """, (user_id,))
-      
+    
         # 確保房間存在（如果是新系統，可能還沒有房間）
         c.execute("SELECT 1 FROM rooms WHERE room_code = %s", (room_code,))
         room_exists = c.fetchone()
-      
+    
         if not room_exists:
             # 創建一個默認房間（用於遷移期間的兼容性）
             c.execute("""
@@ -343,24 +488,24 @@ def add_todo_to_db(room_code, user_id, category, task, context: ContextTypes.DEF
                 VALUES (%s, '臨時房間', %s, %s)
                 ON CONFLICT (room_code) DO NOTHING
             """, (room_code, hash_password('temp'), user_id))
-          
+        
             # 將用戶加入房間
             c.execute("""
                 INSERT INTO room_members (room_code, user_id)
                 VALUES (%s, %s)
                 ON CONFLICT (room_code, user_id) DO NOTHING
             """, (room_code, user_id))
-      
+    
         # 添加待辦
         c.execute("""
             INSERT INTO todos (room_code, user_id, category, task) 
             VALUES (%s, %s, %s, %s)
             RETURNING id
         """, (room_code, user_id, category, task))
-      
+    
         todo_id = c.fetchone()[0]
         conn.commit()
-      
+    
         # 發送通知
         if context:
             asyncio.create_task(notify_room_members(
@@ -368,16 +513,15 @@ def add_todo_to_db(room_code, user_id, category, task, context: ContextTypes.DEF
                 f"📝 新待辦事項添加：\n{task}\n類別：{category}",
                 context
             ))
-      
+    
         return todo_id
-      
+    
     except Exception as e:
         logger.error(f"添加待辦失敗: {e}")
         conn.rollback()
         raise
     finally:
         put_db_connection(conn)
-
 def get_todos(room_code, category=None):
     conn = get_db_connection()
     try:
@@ -411,7 +555,6 @@ def get_todos(room_code, category=None):
         return []
     finally:
         put_db_connection(conn)
-
 def delete_todo(room_code, todo_id, context: ContextTypes.DEFAULT_TYPE = None):
     conn = get_db_connection()
     try:
@@ -449,7 +592,6 @@ def delete_todo(room_code, todo_id, context: ContextTypes.DEFAULT_TYPE = None):
         return False
     finally:
         put_db_connection(conn)
-
 # Keyboard functions
 def get_main_keyboard():
     return ReplyKeyboardMarkup([
@@ -458,36 +600,30 @@ def get_main_keyboard():
         [TEXTS['create_room'], TEXTS['join_room']],
         [TEXTS['help']]
     ], resize_keyboard=True, one_time_keyboard=False)
-
 def get_category_keyboard(operation_type):
     keyboard = []
     for category_id, category_name in CATEGORIES.items():
         keyboard.append([InlineKeyboardButton(category_name, callback_data=f'{operation_type}_category_{category_id}')])
     return InlineKeyboardMarkup(keyboard)
-
 def get_delete_keyboard(todos):
     keyboard = []
     for todo_id, _, _, task in todos:
         keyboard.append([InlineKeyboardButton(f"{task[:20]}...", callback_data=f'delete_{todo_id}')])
     return InlineKeyboardMarkup(keyboard)
-
 # Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         TEXTS['welcome'],
         reply_markup=get_main_keyboard()
     )
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         TEXTS['help_text'],
         reply_markup=get_main_keyboard()
     )
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     message_text = update.message.text
-
     # 房间管理功能
     if message_text == TEXTS['create_room']:
         context.user_data['waiting_room_name'] = True
@@ -543,7 +679,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_main_keyboard()
             )
         return
-
     # 原有功能（需要检查是否在房间中）
     if 'current_room' not in context.user_data:
         if message_text in [TEXTS['query_all'], TEXTS['query_category'], TEXTS['add_todo'], TEXTS['delete_todo']]:
@@ -580,7 +715,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             finally:
                 context.user_data.clear()
-
 async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -592,7 +726,6 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     room_code = context.user_data['current_room']
     data = query.data
-
     if data.startswith('add_category_'):
         category = data.split('_')[2]
         context.user_data['waiting_category'] = category
@@ -611,13 +744,11 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             reply_markup=get_main_keyboard()
         )
-
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
     await update.message.reply_text(
         TEXTS['choose_category'],
         reply_markup=get_category_keyboard(operation_type)
     )
-
 async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
     todos = get_todos(room_code)
     if not todos:
@@ -630,7 +761,6 @@ async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE, ro
         message += f"{i}. {category_name}: {task}\n"
     
     await update.message.reply_text(message, reply_markup=get_main_keyboard())
-
 async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, room_code, category):
     todos = get_todos(room_code, category)
     if not todos:
@@ -643,7 +773,6 @@ async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, room
         message += f"{i}. {task}\n"
     
     await query.edit_message_text(message)
-
 async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
     todos = get_todos(room_code)
     if not todos:
@@ -654,13 +783,11 @@ async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, room
         TEXTS['choose_todo_delete'],
         reply_markup=get_delete_keyboard(todos)
     )
-
 def check_env_vars():
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable not set")
-
 def main():
     application = None
     try:
@@ -684,7 +811,6 @@ def main():
         raise
     finally:
         close_db_pool()
-
 if __name__ == '__main__':
     # 直接调用同步的 main 函数
     main()
