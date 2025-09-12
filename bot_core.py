@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # 环境变量
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-PORT = int(os.getenv('PORT', 8443))  # Render 设置的端口，默认 8443 用于 webhook
+PORT = int(os.getenv('PORT', 8443))
 
 # 全局连接池和调度器
 db_pool = None
@@ -132,19 +132,14 @@ def close_db_pool():
 
 # Database functions
 def init_db():
-    """初始化數據庫表結構"""
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        
-        # 創建users表
         c.execute('''CREATE TABLE IF NOT EXISTS users
                      (user_id BIGINT PRIMARY KEY, 
                       language TEXT DEFAULT 'zh', 
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        # 創建todos表
         c.execute('''CREATE TABLE IF NOT EXISTS todos
                      (id SERIAL PRIMARY KEY, 
                       user_id BIGINT, 
@@ -153,7 +148,6 @@ def init_db():
                       reminder_time TIMESTAMP NULL,
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                       FOREIGN KEY(user_id) REFERENCES users(user_id))''')
-        
         conn.commit()
         logger.info("Database tables initialized successfully")
     except Exception as e:
@@ -163,7 +157,6 @@ def init_db():
         put_db_connection(conn)
 
 def get_user_language(user_id):
-    """獲取用戶語言設置"""
     conn = None
     try:
         conn = get_db_connection()
@@ -178,7 +171,6 @@ def get_user_language(user_id):
         put_db_connection(conn)
 
 def set_user_language(user_id, language):
-    """設置用戶語言"""
     conn = None
     try:
         conn = get_db_connection()
@@ -197,18 +189,15 @@ def set_user_language(user_id, language):
         put_db_connection(conn)
 
 def add_todo_to_db(user_id, category, task, reminder_time=None):
-    """添加待辦事項到數據庫"""
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # 確保用戶存在
         c.execute("""
             INSERT INTO users (user_id) 
             VALUES (%s)
             ON CONFLICT (user_id) DO NOTHING
         """, (user_id,))
-        # 插入待辦事項
         c.execute("""
             INSERT INTO todos (user_id, category, task, reminder_time) 
             VALUES (%s, %s, %s, %s)
@@ -224,7 +213,6 @@ def add_todo_to_db(user_id, category, task, reminder_time=None):
         put_db_connection(conn)
 
 def get_todos(user_id, category=None):
-    """獲取待辦事項列表"""
     conn = None
     try:
         conn = get_db_connection()
@@ -252,7 +240,6 @@ def get_todos(user_id, category=None):
         put_db_connection(conn)
 
 def delete_todo(user_id, todo_id):
-    """刪除待辦事項"""
     conn = None
     try:
         conn = get_db_connection()
@@ -307,7 +294,6 @@ def get_delete_keyboard(language, todos):
 def parse_reminder_time(time_str, language):
     try:
         time_str = time_str.lower().strip()
-        # Try HH:MM format
         if ':' in time_str:
             hours, minutes = map(int, time_str.split(':'))
             now = datetime.now()
@@ -315,8 +301,6 @@ def parse_reminder_time(time_str, language):
             if reminder_time < now:
                 reminder_time += timedelta(days=1)
             return reminder_time
-        
-        # Try "in X hours" format
         if language == 'en':
             if 'hour' in time_str or 'hours' in time_str:
                 hours = int(''.join(filter(str.isdigit, time_str)))
@@ -325,7 +309,6 @@ def parse_reminder_time(time_str, language):
             if '小時' in time_str or '小时' in time_str or '後' in time_str or '后' in time_str:
                 hours = int(''.join(filter(str.isdigit, time_str)))
                 return datetime.now() + timedelta(hours=hours)
-            
     except (ValueError, AttributeError):
         pass
     return None
@@ -335,7 +318,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
-    
     await update.message.reply_text(
         text['welcome'],
         reply_markup=get_main_keyboard(language)
@@ -345,7 +327,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
-    
     await update.message.reply_text(
         text['help_text'],
         reply_markup=get_main_keyboard(language)
@@ -380,26 +361,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message_text == text['help']:
         await help_command(update, context)
     else:
-        # Handle task input
         if 'waiting_task' in context.user_data:
             context.user_data['waiting_task'] = message_text
             await update.message.reply_text(
                 text['need_reminder'],
                 reply_markup=get_reminder_keyboard(language)
             )
-            # 移除之前的 del 语句，这里保留状态供 callback 使用
-        # Handle reminder time input
         elif 'waiting_reminder_time' in context.user_data:
             reminder_time = parse_reminder_time(message_text, language)
             if reminder_time:
                 category = context.user_data['waiting_category']
                 task = context.user_data['waiting_task']
-                
                 todo_id = add_todo_to_db(user_id, category, task, reminder_time)
-                
-                # Schedule reminder
                 await schedule_reminder(user_id, task, reminder_time, todo_id, context)
-                
                 await update.message.reply_text(
                     text['reminder_set'].format(reminder_time.strftime('%Y-%m-%d %H:%M')),
                     reply_markup=get_main_keyboard(language)
@@ -409,7 +383,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     text['invalid_time'] + '\n' + text['enter_reminder_time']
                 )
-                # Keep waiting for valid input
 
 async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -428,22 +401,18 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=TEXTS[new_language]['welcome'],
             reply_markup=get_main_keyboard(new_language)
         )
-
     elif data.startswith('add_category_'):
         category = data.split('_')[2]
         context.user_data['waiting_category'] = category
         context.user_data['waiting_task'] = True
         await query.edit_message_text(text['enter_task'])
-
     elif data.startswith('query_category_'):
         category = data.split('_')[2]
         await show_todos_by_category(query, context, category)
-
     elif data.startswith('reminder_'):
         if 'waiting_task' not in context.user_data or 'waiting_category' not in context.user_data:
             await query.edit_message_text("❌ 操作已過期，請重新開始")
             return
-
         if data == 'reminder_yes':
             await query.edit_message_text(text['enter_reminder_time'])
             context.user_data['waiting_reminder_time'] = True
@@ -457,7 +426,6 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_main_keyboard(language)
             )
             context.user_data.clear()
-
     elif data.startswith('delete_'):
         todo_id = int(data.split('_')[1])
         if delete_todo(user_id, todo_id):
@@ -473,7 +441,6 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, op
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
-    
     await update.message.reply_text(
         text['choose_category'],
         reply_markup=get_category_keyboard(language, operation_type)
@@ -483,48 +450,40 @@ async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
-    
     todos = get_todos(user_id)
     if not todos:
         await update.message.reply_text(text['no_tasks'])
         return
-    
     message = text['all_tasks'] + '\n\n'
     for i, (_, category, task, reminder_time) in enumerate(todos, 1):
         category_name = CATEGORIES[category][language]
         reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {category_name}: {task}{reminder_text}\n"
-    
     await update.message.reply_text(message, reply_markup=get_main_keyboard(language))
 
 async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, category):
     user_id = query.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
-    
     todos = get_todos(user_id, category)
     if not todos:
         await query.edit_message_text(text['no_tasks'])
         return
-    
     category_name = CATEGORIES[category][language]
     message = text['tasks_in_category'].format(category_name) + '\n\n'
     for i, (_, _, task, reminder_time) in enumerate(todos, 1):
         reminder_text = f" ⏰ {reminder_time.strftime('%Y-%m-%d %H:%M')}" if reminder_time else ""
         message += f"{i}. {task}{reminder_text}\n"
-    
     await query.edit_message_text(message)
 
 async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     language = get_user_language(user_id)
     text = TEXTS[language]
-    
     todos = get_todos(user_id)
     if not todos:
         await update.message.reply_text(text['no_tasks'])
         return
-    
     await update.message.reply_text(
         text['choose_todo_delete'],
         reply_markup=get_delete_keyboard(language, todos)
@@ -546,14 +505,13 @@ async def schedule_reminder(user_id, task, reminder_time, todo_id, context):
             )
         except Exception as e:
             logger.error(f"Failed to send reminder for todo_id {todo_id}: {e}")
-
     scheduler.add_job(
         send_reminder,
         trigger=DateTrigger(run_date=reminder_time),
         id=f"reminder_{todo_id}_{user_id}"
     )
 
-# 健康检查服务器类
+# 健康检查服务器
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         logger.info(f"Received health check request: {self.path}")
@@ -566,14 +524,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-            logger.warning(f"Invalid health check path: {self.path}")
 
 def is_port_available(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('0.0.0.0', port)) != 0
 
 def run_health_server():
-    """运行健康检查服务器"""
     port = 10000
     if not is_port_available(port):
         logger.error(f"Port {port} is already in use")
@@ -589,20 +545,15 @@ def check_env_vars():
         raise ValueError("DATABASE_URL environment variable not set")
 
 async def main():
-    """Start the bot."""
     try:
         check_env_vars()
         init_db_pool()
         init_db()
-        logger.info("Database initialized successfully")
         scheduler.start()
-        logger.info("Scheduler started successfully")
         health_thread = threading.Thread(target=run_health_server, daemon=True)
         health_thread.start()
-        logger.info("Health check server started")
-        application = Application.builder().token(TOKEN).build()
         
-        # Add handlers
+        application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("cancel", cancel))
@@ -610,8 +561,6 @@ async def main():
         application.add_handler(CallbackQueryHandler(callback_query))
         
         logger.info("Starting bot with webhook mode...")
-        
-        # 使用Webhook模式
         webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
         await application.bot.set_webhook(webhook_url)
         await application.run_webhook(
@@ -622,6 +571,11 @@ async def main():
         )
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
+        await application.shutdown()  # 确保正确关闭
+        raise
+    finally:
+        scheduler.shutdown()
+        close_db_pool()
 
 if __name__ == '__main__':
     asyncio.run(main())
