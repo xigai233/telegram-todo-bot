@@ -796,11 +796,13 @@ async def show_room_selection(update, context, rooms, operation):
         "🏠 請選擇要操作的房間：",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    
 async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
+    
     if data.startswith('select_room_'):
         # 处理房间选择
         parts = data.split('_')
@@ -848,12 +850,14 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             reply_markup=get_main_keyboard()
         )
+    
     elif data == 'set_reminder':
-    # 用户选择设置提醒
-    await query.edit_message_text(
-        TEXTS['select_date'],
-        reply_markup=create_date_keyboard()
-    )
+        # 用户选择设置提醒 - 这里需要缩进
+        await query.edit_message_text(
+            TEXTS['select_date'],
+            reply_markup=create_date_keyboard()
+        )
+    
     elif data == 'skip_reminder':
         # 用户选择跳过提醒
         await query.edit_message_text(
@@ -861,6 +865,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_keyboard()
         )
         context.user_data.pop('last_todo', None)
+    
     elif data.startswith('remind_date_'):
         # 用户选择了日期
         date_str = data.split('_')[2]
@@ -869,6 +874,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             TEXTS['select_time'],
             reply_markup=create_time_keyboard()
         )
+    
     elif data.startswith('remind_time_'):
         # 用户选择了时间
         time_str = data.split('_')[2]
@@ -916,6 +922,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 清理用户数据
         context.user_data.pop('last_todo', None)
         context.user_data.pop('reminder_date', None)
+    
     elif data == 'cancel_reminder':
         # 用户取消设置提醒
         context.user_data.pop('last_todo', None)
@@ -924,6 +931,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "已取消提醒設置",
             reply_markup=get_main_keyboard()
         )
+    
     elif data.startswith('leave_'):
         room_code = data.split('_')[1]
         success, message = leave_room(room_code, user_id)
@@ -947,6 +955,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             reply_markup=get_main_keyboard()
         )
+
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
     await update.message.reply_text(
         TEXTS['choose_category'],
