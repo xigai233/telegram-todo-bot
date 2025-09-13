@@ -100,8 +100,8 @@ CATEGORIES = {
 # 解析 DATABASE_URL 到 dsn
 def parse_database_url(url):
     parsed = urlparse(url)
-    # 处理端口号，如果为None则使用默认端口10000
-    port = parsed.port if parsed.port else 10000
+    # 处理端口号，如果为None则使用默认端口5432
+    port = parsed.port if parsed.port else 5432
     return (
         f"dbname={parsed.path[1:]} user={parsed.username} password={parsed.password} "
         f"host={parsed.hostname} port={port} sslmode=require"
