@@ -1,39 +1,20 @@
+```python
 import os
 import logging
 import random
 import hashlib
 import threading
 import time
+import calendar
 from datetime import datetime, timedelta
 from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import psycopg2
-import psycopg2.pool
 import asyncio
 import json
-import http.server
-import socketserver
-
-def run_health_check_server():
-    """运行一个极简的健康检查服务器"""
-    port = int(os.getenv('PORT', 10000))
-    
-    class HealthHandler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            if self.path in ['/', '/health', '/ping']:
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'OK')
-            else:
-                self.send_response(404)
-                self.end_headers()
-    
-    # 使用单线程服务器避免冲突
-    with socketserver.TCPServer(("", port), HealthHandler) as httpd:
-        logger.info(f"Health check server started on port {port}")
-        httpd.serve_forever()
+import string
+from urllib.parse import urlparse
 
 # 配置日志 - 减少噪音
 logging.basicConfig(
@@ -49,27 +30,6 @@ logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
-
-def create_flask_app():
-    app = Flask(__name__)
-    
-    @app.route('/')
-    def health_check():
-        return 'Bot is running'
-    
-    @app.route('/health')
-    def health():
-        return 'OK'
-    
-    return app
-
-def run_web_server():
-    """运行Flask服务器来满足Render的端口检测"""
-    app = create_flask_app()
-    port = int(os.getenv('PORT', 10000))
-    logger.info(f"Starting web server on port {port}")
-    # 注意：use_reloader=False 很重要，避免在子线程中重新加载
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # 环境变量
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -124,7 +84,10 @@ TEXTS = {
     'select_date': '📅 請選擇提醒日期：',
     'select_time': '⏰ 請選擇提醒時間：',
     'reminder_set': '✅ 提醒設置成功！將在 {} 發送提醒',
-    'reminder_message': '🔔 提醒：{}'
+    'reminder_message': '🔔 提醒：{}',
+    'no_reminder': '✅ 已跳過提醒設置',
+    'no_tasks_category': '📭 該類別目前沒有待辦事項',
+    'choose_task_to_delete': '🗑️ 請選擇要刪除的待辦事項：'
 }
 
 # Categories
@@ -134,40 +97,45 @@ CATEGORIES = {
     'action': '⭐ 行動'
 }
 
+# 解析 DATABASE_URL 到 dsn
+def parse_database_url(url):
+    parsed = urlparse(url)
+    return (
+        f"dbname={parsed.path[1:]} user={parsed.username} password={parsed.password} "
+        f"host={parsed.hostname} port={parsed.port} sslmode=require"
+    )
+
 # 初始化数据库连接池
 def init_db_pool():
     global db_pool
     try:
+        dsn = parse_database_url(DATABASE_URL)
         db_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=1,
             maxconn=10,
-            dsn=DATABASE_URL,
-            sslmode='require'
+            dsn=dsn
         )
         logger.info("Database connection pool initialized")
     except Exception as e:
         logger.critical(f"Database pool initialization failed: {e}")
         raise
 
-def get_db_connection():
-    global db_pool
-    if db_pool is None:
-        raise Exception("Database connection pool is not initialized")
-    try:
-        return db_pool.getconn()
-    except Exception as e:
-        logger.error(f"Error getting connection from pool: {e}")
-        raise
-
-def put_db_connection(conn):
-    if conn:
-        db_pool.putconn(conn)
-
 def close_db_pool():
     global db_pool
     if db_pool:
         db_pool.closeall()
         logger.info("Database connection pool closed")
+
+def get_db_connection():
+    global db_pool
+    if db_pool is None:
+        init_db_pool()
+    return db_pool.getconn()
+
+def put_db_connection(conn):
+    global db_pool
+    if db_pool and conn:
+        db_pool.putconn(conn)
 
 # 房间管理功能
 def generate_room_code():
@@ -184,30 +152,31 @@ def create_room(room_name, password, owner_id):
     try:
         c = conn.cursor()
         room_code = generate_room_code()
-      
+    
         # 确保房间号不重复
         while True:
             c.execute("SELECT room_code FROM rooms WHERE room_code = %s", (room_code,))
             if not c.fetchone():
                 break
             room_code = generate_room_code()
-      
+    
         hashed_password = hash_password(password)
         c.execute("""
             INSERT INTO rooms (room_code, room_name, password, owner_id)
             VALUES (%s, %s, %s, %s)
         """, (room_code, room_name, hashed_password, owner_id))
-      
+    
         # 自动将创建者加入房间
         c.execute("""
             INSERT INTO room_members (room_code, user_id)
             VALUES (%s, %s)
         """, (room_code, owner_id))
-      
+    
         conn.commit()
         return room_code
     except Exception as e:
         logger.error(f"Error creating room: {e}")
+        conn.rollback()
         raise
     finally:
         put_db_connection(conn)
@@ -217,17 +186,17 @@ def join_room(room_code, password, user_id):
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 验证房间和密码
         c.execute("SELECT password, room_name FROM rooms WHERE room_code = %s", (room_code,))
         result = c.fetchone()
         if not result:
             return False, "房間不存在"
-      
+    
         hashed_password, room_name = result
         if hash_password(password) != hashed_password:
             return False, "密碼錯誤"
-      
+    
         # 加入房间
         try:
             c.execute("""
@@ -240,7 +209,7 @@ def join_room(room_code, password, user_id):
         except Exception as e:
             logger.error(f"Error joining room: {e}")
             return False, "加入失敗"
-          
+        
     except Exception as e:
         logger.error(f"Error in join_room: {e}")
         return False, "系統錯誤"
@@ -252,29 +221,29 @@ def leave_room(room_code, user_id):
     conn = get_db_connection()
     try:
         c = conn.cursor()
-        
+      
         # 获取房间名称用于返回
         c.execute("SELECT room_name FROM rooms WHERE room_code = %s", (room_code,))
         result = c.fetchone()
         if not result:
             return False, "房間不存在"
-        
+      
         room_name = result[0]
-        
+      
         # 离开房间
         c.execute("""
             DELETE FROM room_members 
             WHERE room_code = %s AND user_id = %s
         """, (room_code, user_id))
-        
+      
         conn.commit()
         success = c.rowcount > 0
-        
+      
         if success:
             return True, room_name
         else:
             return False, "您不在該房間中"
-            
+          
     except Exception as e:
         logger.error(f"Error leaving room: {e}")
         return False, "系統錯誤"
@@ -301,6 +270,23 @@ def get_user_rooms(user_id):
     finally:
         put_db_connection(conn)
 
+def get_room_members(room_code):
+    """获取房间所有成员的用户ID"""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT user_id
+            FROM room_members 
+            WHERE room_code = %s
+        """, (room_code,))
+        return [row[0] for row in c.fetchall()]
+    except Exception as e:
+        logger.error(f"获取房间成员失败: {e}")
+        return []
+    finally:
+        put_db_connection(conn)
+
 async def notify_room_members(room_code, message, context: ContextTypes.DEFAULT_TYPE):
     """向房间所有成员发送通知"""
     conn = get_db_connection()
@@ -308,7 +294,7 @@ async def notify_room_members(room_code, message, context: ContextTypes.DEFAULT_
         c = conn.cursor()
         c.execute("SELECT user_id FROM room_members WHERE room_code = %s", (room_code,))
         members = c.fetchall()
-      
+    
         for (user_id,) in members:
             try:
                 await context.bot.send_message(
@@ -327,7 +313,7 @@ def migrate_database():
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 1. 首先創建rooms表（如果不存在）
         c.execute('''
             CREATE TABLE IF NOT EXISTS rooms (
@@ -338,7 +324,7 @@ def migrate_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-      
+    
         # 2. 創建room_members表（如果不存在）
         c.execute('''
             CREATE TABLE IF NOT EXISTS room_members (
@@ -347,11 +333,10 @@ def migrate_database():
                 user_id BIGINT,
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(room_code) REFERENCES rooms(room_code),
-                FOREIGN KEY(user_id) REFERENCES users(user_id),
                 UNIQUE(room_code, user_id)
             )
         ''')
-      
+    
         # 3. 檢查todos表是否有room_code列
         c.execute("""
             SELECT column_name 
@@ -359,10 +344,10 @@ def migrate_database():
             WHERE table_name = 'todos' AND column_name = 'room_code'
         """)
         has_room_code = c.fetchone()
-      
+    
         if not has_room_code:
             logger.info("檢測到舊數據庫結構，開始遷移...")
-          
+        
             # 4. 檢查舊表的結構
             c.execute("""
                 SELECT column_name, data_type 
@@ -372,7 +357,7 @@ def migrate_database():
             """)
             old_columns = c.fetchall()
             logger.info(f"舊表結構: {old_columns}")
-          
+        
             # 5. 創建新表結構（包含room_code）
             c.execute('''
                 CREATE TABLE todos_new (
@@ -382,34 +367,33 @@ def migrate_database():
                     category TEXT,
                     task TEXT, 
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(room_code) REFERENCES rooms(room_code),
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                    FOREIGN KEY(room_code) REFERENCES rooms(room_code)
                 )
             ''')
-          
+        
             # 6. 創建默認房間用於遷移數據
             c.execute("""
                 INSERT INTO rooms (room_code, room_name, password, owner_id)
                 VALUES ('default_room', '默認房間', %s, 0)
                 ON CONFLICT (room_code) DO NOTHING
             """, (hash_password('default'),))
-          
+        
             # 7. 遷移數據 - 明確指定列名
             c.execute("""
                 INSERT INTO todos_new (user_id, category, task, created_at)
                 SELECT user_id, category, task, created_at FROM todos
             """)
-          
+        
             # 8. 刪除舊表並重命名新表
             c.execute("DROP TABLE todos")
             c.execute("ALTER TABLE todos_new RENAME TO todos")
-          
+        
             logger.info("數據庫遷移完成")
         else:
             logger.info("數據庫結構已是最新")
-          
+        
         conn.commit()
-      
+    
     except Exception as e:
         logger.error(f"數據庫遷移失敗: {e}")
         conn.rollback()
@@ -420,11 +404,10 @@ def migrate_database():
 # Database functions
 def init_db():
     """初始化數據庫"""
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         c = conn.cursor()
-      
+    
         # 創建用戶表（必須最先創建）
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -432,15 +415,16 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-      
+    
         conn.commit()
         logger.info("基礎用戶表初始化成功")
-      
+    
         # 執行自動遷移
         migrate_database()
-      
+    
     except Exception as e:
         logger.critical(f"數據庫初始化失敗: {e}")
+        conn.rollback()
         raise
     finally:
         put_db_connection(conn)
@@ -449,50 +433,50 @@ def add_todo_to_db(room_code, user_id, category, task, context: ContextTypes.DEF
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 確保用戶存在
         c.execute("""
             INSERT INTO users (user_id) 
             VALUES (%s)
             ON CONFLICT (user_id) DO NOTHING
         """, (user_id,))
-      
+    
         # 確保房間存在
         c.execute("SELECT 1 FROM rooms WHERE room_code = %s", (room_code,))
         room_exists = c.fetchone()
-      
+    
         if not room_exists:
             return None
-      
+    
         # 檢查用戶是否在房間中
         c.execute("SELECT 1 FROM room_members WHERE room_code = %s AND user_id = %s", (room_code, user_id))
         if not c.fetchone():
             return None
-      
+    
         # 添加待辦
         c.execute("""
             INSERT INTO todos (room_code, user_id, category, task) 
             VALUES (%s, %s, %s, %s)
             RETURNING id
         """, (room_code, user_id, category, task))
-      
+    
         todo_id = c.fetchone()[0]
         conn.commit()
-      
+    
         # 發送通知
         if context:
             asyncio.create_task(notify_room_members(
                 room_code, 
-                f"📝 新待辦事項添加：\n{task}\n類別：{category}",
+                f"📝 新待辦事項添加：\n{task}\n類別：{CATEGORIES.get(category, '未知')}",
                 context
             ))
-      
+    
         return todo_id
-      
+    
     except Exception as e:
         logger.error(f"添加待辦失敗: {e}")
         conn.rollback()
-        raise
+        return None
     finally:
         put_db_connection(conn)
 
@@ -500,30 +484,30 @@ def get_todos(room_code, category=None):
     conn = get_db_connection()
     try:
         c = conn.cursor()
-      
+    
         # 確保房間存在
         c.execute("SELECT 1 FROM rooms WHERE room_code = %s", (room_code,))
         if not c.fetchone():
             return []  # 房間不存在，返回空列表
-          
+        
         if category:
             c.execute("""
-                SELECT id, user_id, category, task
+                SELECT id, user_id, category, task, created_at
                 FROM todos 
                 WHERE room_code = %s AND category = %s 
                 ORDER BY created_at
             """, (room_code, category))
         else:
             c.execute("""
-                SELECT id, user_id, category, task
+                SELECT id, user_id, category, task, created_at
                 FROM todos 
                 WHERE room_code = %s 
                 ORDER BY created_at
             """, (room_code,))
-          
+        
         todos = c.fetchall()
         return todos
-      
+    
     except Exception as e:
         logger.error(f"查詢待辦失敗: {e}")
         return []
@@ -564,6 +548,7 @@ def delete_todo(room_code, todo_id, context: ContextTypes.DEFAULT_TYPE = None):
         return success
     except Exception as e:
         logger.error(f"Error deleting todo: {e}")
+        conn.rollback()
         return False
     finally:
         put_db_connection(conn)
@@ -584,16 +569,19 @@ def get_room_options_keyboard():
         [TEXTS['leave_room']],
         ['⬅️ 返回主菜单']
     ], resize_keyboard=True, one_time_keyboard=False)
+
 def get_category_keyboard(operation_type):
     keyboard = []
     for category_id, category_name in CATEGORIES.items():
         keyboard.append([InlineKeyboardButton(category_name, callback_data=f'{operation_type}_category_{category_id}')])
     return InlineKeyboardMarkup(keyboard)
+
 def get_delete_keyboard(todos):
     keyboard = []
-    for todo_id, _, _, task in todos:
+    for todo_id, _, _, task, _ in todos:
         keyboard.append([InlineKeyboardButton(f"{task[:20]}...", callback_data=f'delete_{todo_id}')])
     return InlineKeyboardMarkup(keyboard)
+
 def get_leave_room_keyboard(rooms):
     """离开房间的选择键盘"""
     keyboard = []
@@ -601,16 +589,21 @@ def get_leave_room_keyboard(rooms):
         keyboard.append([InlineKeyboardButton(f"{room_name} ({room_code})", callback_data=f'leave_{room_code}')])
     keyboard.append([InlineKeyboardButton('⬅️ 取消', callback_data='cancel_leave')])
     return InlineKeyboardMarkup(keyboard)
+
 def get_reminder_keyboard():
     """提醒选择键盘"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(TEXTS['create_reminder'], callback_data='set_reminder')],
         [InlineKeyboardButton(TEXTS['skip_reminder'], callback_data='skip_reminder')]
     ])
-def create_calendar_keyboard():
-    """创建日历键盘（基于第二个项目）"""
-    now = datetime.datetime.now()
-    year, month = now.year, now.month
+
+def create_calendar_keyboard(year=None, month=None):
+    """创建日历键盘"""
+    now = datetime.now()
+    if year is None:
+        year = now.year
+    if month is None:
+        month = now.month
     
     keyboard = []
     # 第一行 - 月份和年份
@@ -637,8 +630,8 @@ def create_calendar_keyboard():
     
     # 导航行
     row = []
-    prev_month = now - datetime.timedelta(days=now.day)
-    next_month = now + datetime.timedelta(days=31-now.day)
+    prev_month = datetime(year, month, 1) - timedelta(days=1)
+    next_month = datetime(year, month, 28) + timedelta(days=4)  # 确保进入下个月
     
     row.append(InlineKeyboardButton("<", callback_data=f"CAL_PREV_{prev_month.year}_{prev_month.month}"))
     row.append(InlineKeyboardButton(" ", callback_data="CAL_IGNORE"))
@@ -646,8 +639,9 @@ def create_calendar_keyboard():
     keyboard.append(row)
     
     return InlineKeyboardMarkup(keyboard)
+
 def create_time_selection_keyboard():
-    """创建时间选择键盘（基于第二个项目）"""
+    """创建时间选择键盘"""
     keyboard = []
     
     # 小时行
@@ -677,11 +671,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TEXTS['welcome'],
         reply_markup=get_main_keyboard()
     )
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         TEXTS['help_text'],
         reply_markup=get_main_keyboard()
     )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     message_text = update.message.text
@@ -696,7 +692,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('waiting_custom_date')
             await update.message.reply_text(
                 TEXTS['select_time'],
-                reply_markup=create_time_keyboard()
+                reply_markup=create_time_selection_keyboard()
             )
         except ValueError:
             await update.message.reply_text("❌ 日期格式錯誤，請使用 YYYY-MM-DD 格式")
@@ -909,7 +905,7 @@ async def show_room_selection(update, context, rooms, operation):
     for room_code, room_name in rooms:
         keyboard.append([InlineKeyboardButton(
             f"{room_name} ({room_code})", 
-            callback_data=f'select_room_{room_code}_{operation}'
+            callback_data=f'select_room_{room_code}_{operation.replace(" ", "_")}'
         )])
     
     await update.message.reply_text(
@@ -927,7 +923,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 处理房间选择
         parts = data.split('_')
         room_code = parts[2]
-        operation = parts[3]
+        operation = '_'.join(parts[3:]).replace("_", " ")
         
         context.user_data['current_room'] = room_code
         
@@ -968,6 +964,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             chat_id=query.message.chat_id,
+            text="返回主菜单",
             reply_markup=get_main_keyboard()
         )
     
@@ -975,7 +972,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 用户选择设置提醒
         await query.edit_message_text(
             TEXTS['select_date'],
-            reply_markup=create_calendar_keyboard()  # 使用新的日历键盘
+            reply_markup=create_calendar_keyboard()
         )
     
     elif data.startswith('CAL_'):
@@ -995,99 +992,30 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         elif data.startswith('CAL_PREV_') or data.startswith('CAL_NEXT_'):
-            # 用户切换月份
+            # 切换月份
             parts = data.split('_')
             year, month = int(parts[2]), int(parts[3])
-            
-            await query.edit_message_text(
-                TEXTS['select_date'],
+            await query.edit_message_reply_markup(
                 reply_markup=create_calendar_keyboard(year, month)
             )
     
-    # 处理时间回调
     elif data.startswith('TIME_'):
         # 用户选择了预设时间
         parts = data.split('_')
-        hour, minute = parts[1], parts[2]
-        time_str = f"{hour}:{minute}"
+        hour, minute = int(parts[1]), int(parts[2])
         
-        await process_time_selection(query, context, time_str)
-    
-    elif data == 'CUSTOM_TIME':
-        # 用户选择自定义时间
-        context.user_data['waiting_custom_time'] = True
-        await query.edit_message_text("请输入时间 (HH:MM 格式，例如 14:30):")
-    
-    elif data == 'skip_reminder':
-        # 用户选择跳过提醒
-        await query.edit_message_text(
-            "已跳過提醒設置",
-            reply_markup=get_main_keyboard()
-        )
-        context.user_data.pop('last_todo', None)
-    
-    elif data.startswith('remind_date_'):
-        # 用户选择了日期 (旧版兼容)
-        date_str = data.split('_')[2]
-        context.user_data['reminder_date'] = date_str
-        await query.edit_message_text(
-            TEXTS['select_time'],
-            reply_markup=create_time_selection_keyboard()  # 使用新的时间键盘
-        )
-    
-    elif data.startswith('remind_time_'):
-        # 用户选择了时间 (旧版兼容)
-        time_str = data.split('_')[2]
-        await process_time_selection(query, context, time_str)
-    
-    elif data == 'cancel_reminder':
-        # 用户取消设置提醒
-        context.user_data.pop('last_todo', None)
-        context.user_data.pop('reminder_date', None)
-        context.user_data.pop('waiting_custom_time', None)
-        await query.edit_message_text(
-            "已取消提醒設置",
-            reply_markup=get_main_keyboard()
-        )
-    
-    elif data.startswith('leave_'):
-        room_code = data.split('_')[1]
-        success, message = leave_room(room_code, user_id)
+        if 'reminder_date' not in context.user_data or 'last_todo' not in context.user_data:
+            await query.edit_message_text("設置失敗，請重新嘗試")
+            return
         
-        if success:
-            await query.edit_message_text(TEXTS['leave_success'].format(message))
-            # 如果离开的是当前操作的房间，清除当前房间设置
-            if context.user_data.get('current_room') == room_code:
-                context.user_data.pop('current_room', None)
-        else:
-            await query.edit_message_text(TEXTS['leave_failed'])
-        
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            reply_markup=get_main_keyboard()
-        )
-    
-    elif data == 'cancel_leave':
-        await query.edit_message_text("已取消離開房間")
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            reply_markup=get_main_keyboard()
-        )
-async def process_time_selection(query, context, time_str):
-    """处理时间选择"""
-    date_str = context.user_data.get('reminder_date')
-    
-    if not date_str or 'last_todo' not in context.user_data:
-        await query.edit_message_text("設置失敗，請重新嘗試")
-        return
-    
-    try:
-        # 解析日期和时间
-        reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        date_str = context.user_data['reminder_date']
+        reminder_datetime = datetime.strptime(f"{date_str} {hour:02d}:{minute:02d}", "%Y-%m-%d %H:%M")
         now = datetime.now()
         
         if reminder_datetime <= now:
-            await query.edit_message_text("❌ 不能設置過去的時間作為提醒")
+            await query.edit_message_text(
+                "❌ 不能設置過去的時間作為提醒"
+            )
             return
         
         # 计算延迟时间（秒）
@@ -1108,154 +1036,158 @@ async def process_time_selection(query, context, time_str):
         )
         
         await query.edit_message_text(
-            TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
-            reply_markup=get_main_keyboard()
+            TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M"))
         )
         
         # 清理用户数据
         context.user_data.pop('last_todo', None)
         context.user_data.pop('reminder_date', None)
-        context.user_data.pop('waiting_custom_time', None)
+    
+    elif data == 'CUSTOM_TIME':
+        # 用户选择自定义时间
+        context.user_data['waiting_custom_time'] = True
+        await query.edit_message_text("請輸入時間 (格式: HH:MM，例如 14:30)")
+    
+    elif data == 'skip_reminder':
+        # 用户选择跳过提醒
+        await query.edit_message_text(
+            TEXTS['no_reminder'],
+            reply_markup=get_main_keyboard()
+        )
+        context.user_data.pop('last_todo', None)
+    
+    elif data.startswith('leave_'):
+        # 离开房间
+        room_code = data.split('_')[1]
+        success, room_name = leave_room(room_code, user_id)
         
-    except Exception as e:
-        logger.error(f"設置提醒失敗: {e}")
-        await query.edit_message_text("❌ 設置提醒失敗")
+        if success:
+            await query.edit_message_text(
+                TEXTS['leave_success'].format(room_name),
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await query.edit_message_text(
+                TEXTS['leave_failed'],
+                reply_markup=get_main_keyboard()
+            )
+    
+    elif data == 'cancel_leave':
+        # 取消离开房间
+        await query.edit_message_text(
+            "已取消",
+            reply_markup=get_main_keyboard()
+        )
 
-async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
-    await update.message.reply_text(
-        TEXTS['choose_category'],
-        reply_markup=get_category_keyboard(operation_type)
-    )
-async def choose_category_from_callback(query, context: ContextTypes.DEFAULT_TYPE, operation_type):
-    await query.edit_message_text(
-        TEXTS['choose_category'],
-        reply_markup=get_category_keyboard(operation_type)
-    )
-async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
-    todos = get_todos(room_code)
-    if not todos:
-        await update.message.reply_text(TEXTS['no_tasks'])
-        return
-    
-    message = TEXTS['all_tasks'] + '\n\n'
-    for i, (_, user_id, category, task) in enumerate(todos, 1):
-        category_name = CATEGORIES[category]
-        message += f"{i}. {category_name}: {task}\n"
-    
-    await update.message.reply_text(message, reply_markup=get_main_keyboard())
-async def query_all_todos_from_callback(query, context: ContextTypes.DEFAULT_TYPE, room_code):
-    todos = get_todos(room_code)
-    if not todos:
-        await query.edit_message_text(TEXTS['no_tasks'])
-        return
-    
-    message = TEXTS['all_tasks'] + '\n\n'
-    for i, (_, user_id, category, task) in enumerate(todos, 1):
-        category_name = CATEGORIES[category]
-        message += f"{i}. {category_name}: {task}\n"
-    
-    await query.edit_message_text(message)
-async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, room_code, category):
-    todos = get_todos(room_code, category)
-    if not todos:
-        await query.edit_message_text(TEXTS['no_tasks'])
-        return
-    
-    category_name = CATEGORIES[category]
-    message = TEXTS['tasks_in_category'].format(category_name) + '\n\n'
-    for i, (_, _, _, task) in enumerate(todos, 1):
-        message += f"{i}. {task}\n"
-    
-    await query.edit_message_text(message)
-async def send_reminder(context):
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     """发送提醒消息"""
     job_data = context.job.data
     room_code = job_data['room_code']
     task = job_data['task']
     category = job_data['category']
     
-    category_name = CATEGORIES.get(category, category)
-    message = TEXTS['reminder_message'].format(f"{category_name}: {task}")
+    # 获取房间所有成员
+    members = get_room_members(room_code)
     
-    # 向房间所有成员发送提醒
-    conn = get_db_connection()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM room_members WHERE room_code = %s", (room_code,))
-        members = c.fetchall()
-        
-        for (user_id,) in members:
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message
-                )
-            except Exception as e:
-                logger.error(f"發送提醒給用戶 {user_id} 失敗: {e}")
-    except Exception as e:
-        logger.error(f"獲取房間成員失敗: {e}")
-    finally:
-        put_db_connection(conn)
-async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
+    for member_id in members:
+        try:
+            await context.bot.send_message(
+                chat_id=member_id,
+                text=f"⏰ 提醒：{CATEGORIES.get(category, '未知')} - {task}"
+            )
+        except Exception as e:
+            logger.error(f"发送提醒失败给用户 {member_id}: {e}")
+
+# Helper functions
+async def query_all_todos(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code: str):
+    todos = get_todos(room_code)
+    if not todos:
+        await update.message.reply_text(TEXTS['no_tasks'])
+        return
+    
+    message = TEXTS['all_tasks'] + "\n\n"
+    for todo_id, user_id, category_id, task, created_at in todos:
+        category_name = CATEGORIES.get(category_id, "未知")
+        message += f"• {category_name} - {task}\n"
+    
+    await update.message.reply_text(message)
+
+async def query_all_todos_from_callback(query, context: ContextTypes.DEFAULT_TYPE, room_code: str):
+    todos = get_todos(room_code)
+    if not todos:
+        await query.edit_message_text(TEXTS['no_tasks'])
+        return
+    
+    message = TEXTS['all_tasks'] + "\n\n"
+    for todo_id, user_id, category_id, task, created_at in todos:
+        category_name = CATEGORIES.get(category_id, "未知")
+        message += f"• {category_name} - {task}\n"
+    
+    await query.edit_message_text(message)
+
+async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type: str):
+    await update.message.reply_text(
+        TEXTS['choose_category'],
+        reply_markup=get_category_keyboard(operation_type)
+    )
+
+async def choose_category_from_callback(query, context: ContextTypes.DEFAULT_TYPE, operation_type: str):
+    await query.edit_message_text(
+        TEXTS['choose_category'],
+        reply_markup=get_category_keyboard(operation_type)
+    )
+
+async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, room_code: str, category_id: str):
+    todos = get_todos(room_code, category_id)
+    if not todos:
+        await query.edit_message_text(TEXTS['no_tasks_category'])
+        return
+    
+    category_name = CATEGORIES.get(category_id, "未知")
+    message = TEXTS['tasks_in_category'].format(category_name) + "\n\n"
+    for todo_id, user_id, category, task, created_at in todos:
+        message += f"• {task}\n"
+    
+    await query.edit_message_text(message)
+
+async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code: str):
     todos = get_todos(room_code)
     if not todos:
         await update.message.reply_text(TEXTS['no_tasks'])
         return
     
     await update.message.reply_text(
-        TEXTS['choose_todo_delete'],
+        TEXTS['choose_task_to_delete'],
         reply_markup=get_delete_keyboard(todos)
     )
-async def choose_delete_from_callback(query, context: ContextTypes.DEFAULT_TYPE, room_code):
+
+async def choose_delete_from_callback(query, context: ContextTypes.DEFAULT_TYPE, room_code: str):
     todos = get_todos(room_code)
     if not todos:
         await query.edit_message_text(TEXTS['no_tasks'])
         return
     
     await query.edit_message_text(
-        TEXTS['choose_todo_delete'],
+        TEXTS['choose_task_to_delete'],
         reply_markup=get_delete_keyboard(todos)
     )
-def check_env_vars():
-    if not TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL environment variable not set")
+
 def main():
-    try:
-        check_env_vars()
-        init_db_pool()
-        init_db()
-        
-        # 在 Render 上不需要健康检查服务器，因为 Render 有内置的健康检查
-        # 可以移除或注释掉健康检查服务器的代码
-        # health_thread = threading.Thread(target=run_health_check_server, daemon=True)
-        # health_thread.start()
-        # logger.info("Health check server started for port detection")
-        
-        application = Application.builder().token(TOKEN).build()
-        
-        # 添加处理器
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(callback_query))
-        
-        # 在 Render 上使用 polling 模式
-        logger.info("Starting bot with polling mode...")
-        application.run_polling(
-            poll_interval=2.0,
-            timeout=15,
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
-            
-    except Exception as e:
-        logger.error(f"Bot startup failed: {e}")
-        raise
-    finally:
-        close_db_pool()
+    """主函数"""
+    init_db_pool()
+    init_db()
+    # 创建应用
+    application = Application.builder().token(TOKEN).build()
+    
+    # 添加处理器
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(callback_query))
+    
+    # 启动应用
+    application.run_polling()
 
 if __name__ == '__main__':
-    # 直接调用同步的 main 函数
     main()
+```
