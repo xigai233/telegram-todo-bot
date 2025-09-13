@@ -1,40 +1,51 @@
 import os
 import logging
-import asyncio
 import random
 import hashlib
+import threading
+import time
 from datetime import datetime, timedelta
+from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import psycopg2
 import psycopg2.pool
-from aiohttp import web
-import threading
-import asyncio
 
-async def health_check(request):
-    return web.Response(text="Bot is running")
+# 配置日志 - 减少噪音
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# 降低某些库的日志级别
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('apscheduler').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
+def create_flask_app():
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def health_check():
+        return 'Bot is running'
+    
+    @app.route('/health')
+    def health():
+        return 'OK'
+    
+    return app
 
 def run_web_server():
-    """运行一个简单的HTTP服务器来满足Render的端口检测"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    # 使用环境变量PORT，如果没有则使用默认端口10000
+    """运行Flask服务器来满足Render的端口检测"""
+    app = create_flask_app()
     port = int(os.getenv('PORT', 10000))
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    web.run_app(app, port=port, host='0.0.0.0')
-
-# 配置日志
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+    logger.info(f"Starting web server on port {port}")
+    # 注意：use_reloader=False 很重要，避免在子线程中重新加载
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # 环境变量
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -880,7 +891,11 @@ def main():
         # 启动Web服务器线程（用于端口检测）
         web_thread = threading.Thread(target=run_web_server, daemon=True)
         web_thread.start()
-        logger.info(f"Web server started on port {os.getenv('PORT', 10000)}")
+        logger.info("Web server started for port detection")
+        
+        # 给Web服务器一点时间启动
+        import time
+        time.sleep(2)
         
         application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
@@ -890,7 +905,7 @@ def main():
         
         logger.info("Starting bot with polling mode...")
         application.run_polling()
-
+            
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         raise
