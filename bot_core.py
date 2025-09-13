@@ -607,42 +607,67 @@ def get_reminder_keyboard():
         [InlineKeyboardButton(TEXTS['create_reminder'], callback_data='set_reminder')],
         [InlineKeyboardButton(TEXTS['skip_reminder'], callback_data='skip_reminder')]
     ])
-def create_date_keyboard():
-    """创建日期选择键盘"""
-    today = datetime.now()
+def create_calendar_keyboard():
+    """创建日历键盘（基于第二个项目）"""
+    now = datetime.datetime.now()
+    year, month = now.year, now.month
+    
     keyboard = []
+    # 第一行 - 月份和年份
+    row = [InlineKeyboardButton(f"{calendar.month_name[month]} {year}", callback_data="CAL_IGNORE")]
+    keyboard.append(row)
     
-    # 今天、明天、后天
-    for i in range(3):
-        date = today + timedelta(days=i)
-        button_text = f"{'今天' if i == 0 else '明天' if i == 1 else '后天'} ({date.strftime('%m/%d')})"
-        callback_data = f"remind_date_{date.strftime('%Y-%m-%d')}"
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    # 第二行 - 星期
+    row = []
+    for day in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]:
+        row.append(InlineKeyboardButton(day, callback_data="CAL_IGNORE"))
+    keyboard.append(row)
     
-    # 自定义日期选项
-    keyboard.append([InlineKeyboardButton("選擇其他日期", callback_data="custom_date")])
+    # 日历日期
+    my_calendar = calendar.monthcalendar(year, month)
+    for week in my_calendar:
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="CAL_IGNORE"))
+            else:
+                callback_data = f"CAL_DAY_{year}_{month}_{day}"
+                row.append(InlineKeyboardButton(str(day), callback_data=callback_data))
+        keyboard.append(row)
+    
+    # 导航行
+    row = []
+    prev_month = now - datetime.timedelta(days=now.day)
+    next_month = now + datetime.timedelta(days=31-now.day)
+    
+    row.append(InlineKeyboardButton("<", callback_data=f"CAL_PREV_{prev_month.year}_{prev_month.month}"))
+    row.append(InlineKeyboardButton(" ", callback_data="CAL_IGNORE"))
+    row.append(InlineKeyboardButton(">", callback_data=f"CAL_NEXT_{next_month.year}_{next_month.month}"))
+    keyboard.append(row)
     
     return InlineKeyboardMarkup(keyboard)
-
-def create_time_keyboard():
-    """创建时间选择键盘"""
+def create_time_selection_keyboard():
+    """创建时间选择键盘（基于第二个项目）"""
     keyboard = []
-    times = [
-        ["09:00", "12:00", "15:00"],
-        ["18:00", "21:00", "00:00"],
-        ["選擇其他時間", "取消"]
-    ]
     
-    for row in times:
-        button_row = []
-        for time in row:
-            if time == "選擇其他時間":
-                button_row.append(InlineKeyboardButton(time, callback_data="custom_time"))
-            elif time == "取消":
-                button_row.append(InlineKeyboardButton(time, callback_data="cancel_reminder"))
-            else:
-                button_row.append(InlineKeyboardButton(time, callback_data=f"remind_time_{time}"))
-        keyboard.append(button_row)
+    # 小时行
+    hours_row = []
+    for hour in [9, 10, 11, 12]:
+        hours_row.append(InlineKeyboardButton(f"{hour:02d}:00", callback_data=f"TIME_{hour:02d}_00"))
+    keyboard.append(hours_row)
+    
+    hours_row = []
+    for hour in [13, 14, 15, 16]:
+        hours_row.append(InlineKeyboardButton(f"{hour:02d}:00", callback_data=f"TIME_{hour:02d}_00"))
+    keyboard.append(hours_row)
+    
+    hours_row = []
+    for hour in [17, 18, 19, 20]:
+        hours_row.append(InlineKeyboardButton(f"{hour:02d}:00", callback_data=f"TIME_{hour:02d}_00"))
+    keyboard.append(hours_row)
+    
+    # 自定义时间行
+    keyboard.append([InlineKeyboardButton("自定义时间", callback_data="CUSTOM_TIME")])
     
     return InlineKeyboardMarkup(keyboard)
 
@@ -947,11 +972,51 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data == 'set_reminder':
-        # 用户选择设置提醒 - 这里需要缩进
+        # 用户选择设置提醒
         await query.edit_message_text(
             TEXTS['select_date'],
-            reply_markup=create_date_keyboard()
+            reply_markup=create_calendar_keyboard()  # 使用新的日历键盘
         )
+    
+    elif data.startswith('CAL_'):
+        # 处理日历回调
+        if data == 'CAL_IGNORE':
+            return
+        
+        elif data.startswith('CAL_DAY_'):
+            # 用户选择了日期
+            parts = data.split('_')
+            year, month, day = int(parts[2]), int(parts[3]), int(parts[4])
+            context.user_data['reminder_date'] = f"{year}-{month:02d}-{day:02d}"
+            
+            await query.edit_message_text(
+                TEXTS['select_time'],
+                reply_markup=create_time_selection_keyboard()
+            )
+        
+        elif data.startswith('CAL_PREV_') or data.startswith('CAL_NEXT_'):
+            # 用户切换月份
+            parts = data.split('_')
+            year, month = int(parts[2]), int(parts[3])
+            
+            await query.edit_message_text(
+                TEXTS['select_date'],
+                reply_markup=create_calendar_keyboard(year, month)
+            )
+    
+    # 处理时间回调
+    elif data.startswith('TIME_'):
+        # 用户选择了预设时间
+        parts = data.split('_')
+        hour, minute = parts[1], parts[2]
+        time_str = f"{hour}:{minute}"
+        
+        await process_time_selection(query, context, time_str)
+    
+    elif data == 'CUSTOM_TIME':
+        # 用户选择自定义时间
+        context.user_data['waiting_custom_time'] = True
+        await query.edit_message_text("请输入时间 (HH:MM 格式，例如 14:30):")
     
     elif data == 'skip_reminder':
         # 用户选择跳过提醒
@@ -962,66 +1027,24 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('last_todo', None)
     
     elif data.startswith('remind_date_'):
-        # 用户选择了日期
+        # 用户选择了日期 (旧版兼容)
         date_str = data.split('_')[2]
         context.user_data['reminder_date'] = date_str
         await query.edit_message_text(
             TEXTS['select_time'],
-            reply_markup=create_time_keyboard()
+            reply_markup=create_time_selection_keyboard()  # 使用新的时间键盘
         )
     
     elif data.startswith('remind_time_'):
-        # 用户选择了时间
+        # 用户选择了时间 (旧版兼容)
         time_str = data.split('_')[2]
-        date_str = context.user_data.get('reminder_date')
-        
-        if not date_str or 'last_todo' not in context.user_data:
-            await query.edit_message_text("設置失敗，請重新嘗試")
-            return
-        
-        # 解析日期和时间
-        try:
-            reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            now = datetime.now()
-            
-            if reminder_datetime <= now:
-                await query.edit_message_text("❌ 不能設置過去的時間作為提醒")
-                return
-            
-            # 计算延迟时间（秒）
-            delay = (reminder_datetime - now).total_seconds()
-            
-            # 获取待办信息
-            todo_info = context.user_data['last_todo']
-            
-            # 安排提醒任务
-            context.job_queue.run_once(
-                send_reminder, 
-                delay, 
-                data={
-                    'room_code': todo_info['room_code'],
-                    'task': todo_info['task'],
-                    'category': todo_info['category']
-                }
-            )
-            
-            await query.edit_message_text(
-                TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
-                reply_markup=get_main_keyboard()
-            )
-            
-        except Exception as e:
-            logger.error(f"設置提醒失敗: {e}")
-            await query.edit_message_text("❌ 設置提醒失敗")
-        
-        # 清理用户数据
-        context.user_data.pop('last_todo', None)
-        context.user_data.pop('reminder_date', None)
+        await process_time_selection(query, context, time_str)
     
     elif data == 'cancel_reminder':
         # 用户取消设置提醒
         context.user_data.pop('last_todo', None)
         context.user_data.pop('reminder_date', None)
+        context.user_data.pop('waiting_custom_time', None)
         await query.edit_message_text(
             "已取消提醒設置",
             reply_markup=get_main_keyboard()
@@ -1050,7 +1073,54 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             reply_markup=get_main_keyboard()
         )
-
+async def process_time_selection(query, context, time_str):
+    """处理时间选择"""
+    date_str = context.user_data.get('reminder_date')
+    
+    if not date_str or 'last_todo' not in context.user_data:
+        await query.edit_message_text("設置失敗，請重新嘗試")
+        return
+    
+    try:
+        # 解析日期和时间
+        reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        now = datetime.now()
+        
+        if reminder_datetime <= now:
+            await query.edit_message_text("❌ 不能設置過去的時間作為提醒")
+            return
+        
+        # 计算延迟时间（秒）
+        delay = (reminder_datetime - now).total_seconds()
+        
+        # 获取待办信息
+        todo_info = context.user_data['last_todo']
+        
+        # 安排提醒任务
+        context.job_queue.run_once(
+            send_reminder, 
+            delay, 
+            data={
+                'room_code': todo_info['room_code'],
+                'task': todo_info['task'],
+                'category': todo_info['category']
+            }
+        )
+        
+        await query.edit_message_text(
+            TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
+            reply_markup=get_main_keyboard()
+        )
+        
+        # 清理用户数据
+        context.user_data.pop('last_todo', None)
+        context.user_data.pop('reminder_date', None)
+        context.user_data.pop('waiting_custom_time', None)
+        
+    except Exception as e:
+        logger.error(f"設置提醒失敗: {e}")
+        await query.edit_message_text("❌ 設置提醒失敗")
+        
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
     await update.message.reply_text(
         TEXTS['choose_category'],
@@ -1157,58 +1227,48 @@ def main():
         init_db_pool()
         init_db()
         
-        # 启动极简健康检查服务器（替代Flask）
-        def run_simple_server():
-            import socket
-            port = int(os.getenv('PORT', 10000))
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('0.0.0.0', port))
-                s.listen(1)
-                logger.info(f"Simple health server started on port {port}")
-                while True:
-                    conn, addr = s.accept()
-                    with conn:
-                        data = conn.recv(1024)
-                        if b'GET /' in data or b'GET /health' in data:
-                            conn.send(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK')
-                        conn.close()
-                    # 使用全局的time模块
-                    time.sleep(0.1)  # 添加短暂延迟避免CPU占用过高
-        
-        # 启动健康检查服务器在后台线程
-        health_thread = threading.Thread(target=run_simple_server, daemon=True)
+        # 启动健康检查服务器
+        health_thread = threading.Thread(target=run_health_check_server, daemon=True)
         health_thread.start()
         logger.info("Health check server started for port detection")
         
-          
         application = Application.builder().token(TOKEN).build()
+        
+        # 添加处理器
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
-        
-        # 修复：只保留一个消息处理器
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(callback_query))
         
-        logger.info("Starting bot with polling mode...")
+        # 使用Webhook而不是Polling
+        port = int(os.getenv('PORT', 10000))
+        webhook_url = os.getenv('WEBHOOK_URL')
         
-        # 使用更保守的polling设置
-        application.run_polling(
-            poll_interval=2.0,  # 增加轮询间隔
-            timeout=15,
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
+        if webhook_url:
+            # 生产环境使用Webhook
+            logger.info("Starting bot with webhook mode...")
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=TOKEN,
+                webhook_url=f"{webhook_url}/{TOKEN}",
+                drop_pending_updates=True
+            )
+        else:
+            # 开发环境使用Polling
+            logger.info("Starting bot with polling mode...")
+            application.run_polling(
+                poll_interval=2.0,
+                timeout=15,
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES
+            )
             
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
-        if "Conflict" in str(e):
-            logger.info("Another instance detected, this is normal on Render")
-            # 在Render上，冲突是正常的，我们继续运行
-            time.sleep(60)  # 等待一段时间再退出
         raise
     finally:
         close_db_pool()
-
 if __name__ == '__main__':
     # 直接调用同步的 main 函数
     main()
