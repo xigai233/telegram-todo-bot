@@ -12,6 +12,28 @@ import psycopg2
 import psycopg2.pool
 import asyncio
 import json
+import http.server
+import socketserver
+
+def run_health_check_server():
+    """运行一个极简的健康检查服务器"""
+    port = int(os.getenv('PORT', 10000))
+    
+    class HealthHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ['/', '/health', '/ping']:
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'OK')
+            else:
+                self.send_response(404)
+                self.end_headers()
+    
+    # 使用单线程服务器避免冲突
+    with socketserver.TCPServer(("", port), HealthHandler) as httpd:
+        logger.info(f"Health check server started on port {port}")
+        httpd.serve_forever()
 
 # 配置日志 - 减少噪音
 logging.basicConfig(
@@ -707,6 +729,224 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ 時間格式錯誤，請使用 HH:MM 格式")
         return
+    # 房间管理功能
+    if message_text == TEXTS['room_options']:
+        await update.message.reply_text(
+            "🏠 房間管理選項",
+            reply_markup=get_room_options_keyboard()
+        )
+        return
+  
+    elif message_text == TEXTS['create_room']:
+        context.user_data['waiting_room_name'] = True
+        await update.message.reply_text(TEXTS['enter_room_name'])
+        return
+  
+    elif message_text == TEXTS['join_room']:
+        context.user_data['waiting_room_code'] = True
+        await update.message.reply_text(TEXTS['enter_room_code'])
+        return
+  
+    elif message_text == TEXTS['leave_room']:
+        rooms = get_user_rooms(user_id)
+        if not rooms:
+            await update.message.reply_text(
+                TEXTS['no_rooms_joined'],
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        await update.message.reply_text(
+            TEXTS['choose_room_to_leave'],
+            reply_markup=get_leave_room_keyboard(rooms)
+        )
+        return
+  
+    elif message_text == '⬅️ 返回主菜单':
+        await update.message.reply_text(
+            "返回主菜单",
+            reply_markup=get_main_keyboard()
+        )
+        return
+  
+    elif 'waiting_room_name' in context.user_data:
+        context.user_data['room_name'] = message_text
+        context.user_data['waiting_room_password'] = True
+        context.user_data.pop('waiting_room_name')
+        await update.message.reply_text(TEXTS['enter_room_password'])
+        return
+  
+    elif 'waiting_room_password' in context.user_data:
+        room_name = context.user_data['room_name']
+        password = message_text
+        room_code = create_room(room_name, password, user_id)
+        context.user_data.clear()
+        await update.message.reply_text(
+            TEXTS['room_created'].format(room_code),
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    elif 'waiting_room_code' in context.user_data:
+        context.user_data['room_code'] = message_text
+        context.user_data['waiting_join_password'] = True
+        context.user_data.pop('waiting_room_code')
+        await update.message.reply_text(TEXTS['enter_join_password'])
+        return
+    
+    elif 'waiting_join_password' in context.user_data:
+        room_code = context.user_data['room_code']
+        password = message_text
+        success, message = join_room(room_code, password, user_id)
+        context.user_data.clear()
+        
+        if success:
+            await update.message.reply_text(
+                TEXTS['join_success'].format(message),
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                TEXTS['join_failed'].format(message),
+                reply_markup=get_main_keyboard()
+            )
+        return
+    
+    # 待办事项功能 - 需要选择当前操作的房间
+    if message_text in [TEXTS['query_all'], TEXTS['query_category'], TEXTS['add_todo'], TEXTS['delete_todo']]:
+        rooms = get_user_rooms(user_id)
+        if not rooms:
+            await update.message.reply_text(TEXTS['not_in_room'])
+            return
+        
+        # 如果用户只有一个房间，直接使用该房间
+        if len(rooms) == 1:
+            room_code, room_name = rooms[0]
+            context.user_data['current_room'] = room_code
+        else:
+            # 多个房间时需要用户选择
+            context.user_data['pending_operation'] = message_text
+            await show_room_selection(update, context, rooms, message_text)
+            return
+    
+    # 获取当前操作的房间
+    current_room = context.user_data.get('current_room')
+    if not current_room:
+        await update.message.reply_text(TEXTS['not_in_room'])
+        return
+    
+    if message_text == TEXTS['query_all']:
+        await query_all_todos(update, context, current_room)
+    elif message_text == TEXTS['query_category']:
+        await choose_category(update, context, 'query')
+    elif message_text == TEXTS['add_todo']:
+        await choose_category(update, context, 'add')
+    elif message_text == TEXTS['delete_todo']:
+        await choose_delete(update, context, current_room)
+    elif message_text == TEXTS['help']:
+        await help_command(update, context)
+    else:
+        if 'waiting_task' in context.user_data:
+            category = context.user_data['waiting_category']
+            task = message_text
+            try:
+                todo_id = add_todo_to_db(current_room, user_id, category, task, context)
+                if todo_id:
+                    context.user_data['last_todo'] = {
+                        'id': todo_id,
+                        'category': category,
+                        'task': task,
+                        'room_code': current_room
+                    }
+                    await update.message.reply_text(
+                        TEXTS['ask_reminder'],
+                        reply_markup=get_reminder_keyboard()
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ 添加失敗，請確認您仍在該房間中",
+                        reply_markup=get_main_keyboard()
+                    )
+            except Exception as e:
+                logger.error(f"添加待辦失敗: {e}")
+                await update.message.reply_text(
+                    "❌ 添加失敗，請稍後重試",
+                    reply_markup=get_main_keyboard()
+                )
+            finally:
+                context.user_data.pop('waiting_task', None)
+                context.user_data.pop('waiting_category', None)
+    user_id = update.message.from_user.id
+    message_text = update.message.text
+    
+    # 首先检查自定义日期和时间的输入
+    if 'waiting_custom_date' in context.user_data:
+        # 处理自定义日期输入
+        try:
+            date_str = update.message.text
+            datetime.strptime(date_str, "%Y-%m-%d")  # 验证日期格式
+            context.user_data['reminder_date'] = date_str
+            context.user_data.pop('waiting_custom_date')
+            await update.message.reply_text(
+                TEXTS['select_time'],
+                reply_markup=create_time_keyboard()
+            )
+        except ValueError:
+            await update.message.reply_text("❌ 日期格式錯誤，請使用 YYYY-MM-DD 格式")
+        return
+    
+    elif 'waiting_custom_time' in context.user_data:
+        # 处理自定义时间输入
+        try:
+            time_str = update.message.text
+            datetime.strptime(time_str, "%H:%M")  # 验证时间格式
+            date_str = context.user_data.get('reminder_date')
+            
+            if not date_str or 'last_todo' not in context.user_data:
+                await update.message.reply_text("設置失敗，請重新嘗試")
+                return
+            
+            # 解析日期和时间
+            reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            now = datetime.now()
+            
+            if reminder_datetime <= now:
+                await update.message.reply_text(
+                    "❌ 不能設置過去的時間作為提醒",
+                    reply_markup=get_main_keyboard()
+                )
+                return
+            
+            # 计算延迟时间（秒）
+            delay = (reminder_datetime - now).total_seconds()
+            
+            # 获取待办信息
+            todo_info = context.user_data['last_todo']
+            
+            # 安排提醒任务
+            context.job_queue.run_once(
+                send_reminder, 
+                delay, 
+                data={
+                    'room_code': todo_info['room_code'],
+                    'task': todo_info['task'],
+                    'category': todo_info['category']
+                }
+            )
+            
+            await update.message.reply_text(
+                TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
+                reply_markup=get_main_keyboard()
+            )
+            
+            # 清理用户数据
+            context.user_data.pop('last_todo', None)
+            context.user_data.pop('reminder_date', None)
+            context.user_data.pop('waiting_custom_time', None)
+            
+        except ValueError:
+            await update.message.reply_text("❌ 時間格式錯誤，請使用 HH:MM 格式")
+        return
 
     # 房间管理功能
     if message_text == TEXTS['room_options']:
@@ -1032,6 +1272,7 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         context.user_data['current_room'] = room_code
         
+        # 使用 TEXTS 字典中的值进行比较
         if operation == 'query_all':
             await query_all_todos_from_callback(query, context, room_code)
         elif operation == 'query_category':
@@ -1466,29 +1707,60 @@ def main():
         init_db_pool()
         init_db()
         
-        # 启动Web服务器线程（用于端口检测）
-        web_thread = threading.Thread(target=run_web_server, daemon=True)
-        web_thread.start()
-        logger.info("Web server started for port detection")
+        # 启动极简健康检查服务器（替代Flask）
+        def run_simple_server():
+            import socket
+            port = int(os.getenv('PORT', 10000))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('0.0.0.0', port))
+                s.listen(1)
+                logger.info(f"Simple health server started on port {port}")
+                while True:
+                    conn, addr = s.accept()
+                    with conn:
+                        data = conn.recv(1024)
+                        if b'GET /' in data or b'GET /health' in data:
+                            conn.send(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK')
+                        conn.close()
         
-        # 给Web服务器一点时间启动
-        import time
+        # 启动健康检查服务器在后台线程
+        health_thread = threading.Thread(target=run_simple_server, daemon=True)
+        health_thread.start()
+        logger.info("Health check server started for port detection")
+        
+        # 给服务器一点时间启动
         time.sleep(2)
         
         application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
+        
+        # 修复：只保留一个消息处理器
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(callback_query))
         
         logger.info("Starting bot with polling mode...")
-        application.run_polling()
+        
+        # 使用更保守的polling设置
+        application.run_polling(
+            poll_interval=2.0,  # 增加轮询间隔
+            timeout=15,
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
             
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
+        if "Conflict" in str(e):
+            logger.info("Another instance detected, this is normal on Render")
+            # 在Render上，冲突是正常的，我们继续运行
+            import time
+            time.sleep(60)  # 等待一段时间再退出
         raise
     finally:
         close_db_pool()
+
+
 if __name__ == '__main__':
     # 直接调用同步的 main 函数
     main()
