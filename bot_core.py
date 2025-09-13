@@ -8,6 +8,26 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import psycopg2
 import psycopg2.pool
+from aiohttp import web
+import threading
+import asyncio
+
+async def health_check(request):
+    return web.Response(text="Bot is running")
+
+def run_web_server():
+    """运行一个简单的HTTP服务器来满足Render的端口检测"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    # 使用环境变量PORT，如果没有则使用默认端口10000
+    port = int(os.getenv('PORT', 10000))
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    web.run_app(app, port=port, host='0.0.0.0')
 
 # 配置日志
 logging.basicConfig(
@@ -852,11 +872,15 @@ def check_env_vars():
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable not set")
 def main():
-    application = None
     try:
         check_env_vars()
         init_db_pool()
         init_db()
+        
+        # 启动Web服务器线程（用于端口检测）
+        web_thread = threading.Thread(target=run_web_server, daemon=True)
+        web_thread.start()
+        logger.info(f"Web server started on port {os.getenv('PORT', 10000)}")
         
         application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
@@ -865,10 +889,8 @@ def main():
         application.add_handler(CallbackQueryHandler(callback_query))
         
         logger.info("Starting bot with polling mode...")
-        
-        # 使用同步的 run_polling 方法
         application.run_polling()
-            
+
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         raise
