@@ -638,6 +638,226 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     message_text = update.message.text
+    
+    # 首先检查自定义日期和时间的输入
+    if 'waiting_custom_date' in context.user_data:
+        # 处理自定义日期输入
+        try:
+            date_str = update.message.text
+            datetime.strptime(date_str, "%Y-%m-%d")  # 验证日期格式
+            context.user_data['reminder_date'] = date_str
+            context.user_data.pop('waiting_custom_date')
+            await update.message.reply_text(
+                TEXTS['select_time'],
+                reply_markup=create_time_keyboard()
+            )
+        except ValueError:
+            await update.message.reply_text("❌ 日期格式錯誤，請使用 YYYY-MM-DD 格式")
+        return
+    
+    elif 'waiting_custom_time' in context.user_data:
+        # 处理自定义时间输入
+        try:
+            time_str = update.message.text
+            datetime.strptime(time_str, "%H:%M")  # 验证时间格式
+            date_str = context.user_data.get('reminder_date')
+            
+            if not date_str or 'last_todo' not in context.user_data:
+                await update.message.reply_text("設置失敗，請重新嘗試")
+                return
+            
+            # 解析日期和时间
+            reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            now = datetime.now()
+            
+            if reminder_datetime <= now:
+                await update.message.reply_text(
+                    "❌ 不能設置過去的時間作為提醒",
+                    reply_markup=get_main_keyboard()
+                )
+                return
+            
+            # 计算延迟时间（秒）
+            delay = (reminder_datetime - now).total_seconds()
+            
+            # 获取待办信息
+            todo_info = context.user_data['last_todo']
+            
+            # 安排提醒任务
+            context.job_queue.run_once(
+                send_reminder, 
+                delay, 
+                data={
+                    'room_code': todo_info['room_code'],
+                    'task': todo_info['task'],
+                    'category': todo_info['category']
+                }
+            )
+            
+            await update.message.reply_text(
+                TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
+                reply_markup=get_main_keyboard()
+            )
+            
+            # 清理用户数据
+            context.user_data.pop('last_todo', None)
+            context.user_data.pop('reminder_date', None)
+            context.user_data.pop('waiting_custom_time', None)
+            
+        except ValueError:
+            await update.message.reply_text("❌ 時間格式錯誤，請使用 HH:MM 格式")
+        return
+
+    # 房间管理功能
+    if message_text == TEXTS['room_options']:
+        await update.message.reply_text(
+            "🏠 房間管理選項",
+            reply_markup=get_room_options_keyboard()
+        )
+        return
+  
+    elif message_text == TEXTS['create_room']:
+        context.user_data['waiting_room_name'] = True
+        await update.message.reply_text(TEXTS['enter_room_name'])
+        return
+  
+    elif message_text == TEXTS['join_room']:
+        context.user_data['waiting_room_code'] = True
+        await update.message.reply_text(TEXTS['enter_room_code'])
+        return
+  
+    elif message_text == TEXTS['leave_room']:
+        rooms = get_user_rooms(user_id)
+        if not rooms:
+            await update.message.reply_text(
+                TEXTS['no_rooms_joined'],
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        await update.message.reply_text(
+            TEXTS['choose_room_to_leave'],
+            reply_markup=get_leave_room_keyboard(rooms)
+        )
+        return
+  
+    elif message_text == '⬅️ 返回主菜单':
+        await update.message.reply_text(
+            "返回主菜单",
+            reply_markup=get_main_keyboard()
+        )
+        return
+  
+    elif 'waiting_room_name' in context.user_data:
+        context.user_data['room_name'] = message_text
+        context.user_data['waiting_room_password'] = True
+        context.user_data.pop('waiting_room_name')
+        await update.message.reply_text(TEXTS['enter_room_password'])
+        return
+  
+    elif 'waiting_room_password' in context.user_data:
+        room_name = context.user_data['room_name']
+        password = message_text
+        room_code = create_room(room_name, password, user_id)
+        context.user_data.clear()
+        await update.message.reply_text(
+            TEXTS['room_created'].format(room_code),
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    elif 'waiting_room_code' in context.user_data:
+        context.user_data['room_code'] = message_text
+        context.user_data['waiting_join_password'] = True
+        context.user_data.pop('waiting_room_code')
+        await update.message.reply_text(TEXTS['enter_join_password'])
+        return
+    
+    elif 'waiting_join_password' in context.user_data:
+        room_code = context.user_data['room_code']
+        password = message_text
+        success, message = join_room(room_code, password, user_id)
+        context.user_data.clear()
+        
+        if success:
+            await update.message.reply_text(
+                TEXTS['join_success'].format(message),
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                TEXTS['join_failed'].format(message),
+                reply_markup=get_main_keyboard()
+            )
+        return
+    
+    # 待办事项功能 - 需要选择当前操作的房间
+    if message_text in [TEXTS['query_all'], TEXTS['query_category'], TEXTS['add_todo'], TEXTS['delete_todo']]:
+        rooms = get_user_rooms(user_id)
+        if not rooms:
+            await update.message.reply_text(TEXTS['not_in_room'])
+            return
+        
+        # 如果用户只有一个房间，直接使用该房间
+        if len(rooms) == 1:
+            room_code, room_name = rooms[0]
+            context.user_data['current_room'] = room_code
+        else:
+            # 多个房间时需要用户选择
+            context.user_data['pending_operation'] = message_text
+            await show_room_selection(update, context, rooms, message_text)
+            return
+    
+    # 获取当前操作的房间
+    current_room = context.user_data.get('current_room')
+    if not current_room:
+        await update.message.reply_text(TEXTS['not_in_room'])
+        return
+    
+    if message_text == TEXTS['query_all']:
+        await query_all_todos(update, context, current_room)
+    elif message_text == TEXTS['query_category']:
+        await choose_category(update, context, 'query')
+    elif message_text == TEXTS['add_todo']:
+        await choose_category(update, context, 'add')
+    elif message_text == TEXTS['delete_todo']:
+        await choose_delete(update, context, current_room)
+    elif message_text == TEXTS['help']:
+        await help_command(update, context)
+    else:
+        if 'waiting_task' in context.user_data:
+            category = context.user_data['waiting_category']
+            task = message_text
+            try:
+                todo_id = add_todo_to_db(current_room, user_id, category, task, context)
+                if todo_id:
+                    context.user_data['last_todo'] = {
+                        'id': todo_id,
+                        'category': category,
+                        'task': task,
+                        'room_code': current_room
+                    }
+                    await update.message.reply_text(
+                        TEXTS['ask_reminder'],
+                        reply_markup=get_reminder_keyboard()
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ 添加失敗，請確認您仍在該房間中",
+                        reply_markup=get_main_keyboard()
+                    )
+            except Exception as e:
+                logger.error(f"添加待辦失敗: {e}")
+                await update.message.reply_text(
+                    "❌ 添加失敗，請稍後重試",
+                    reply_markup=get_main_keyboard()
+                )
+            finally:
+                context.user_data.pop('waiting_task', None)
+                context.user_data.pop('waiting_category', None)
+
+    user_id = update.message.from_user.id
+    message_text = update.message.text
     # 房间管理功能
     if message_text == TEXTS['room_options']:
         await update.message.reply_text(
@@ -783,6 +1003,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             finally:
                 context.user_data.clear()
+    
 async def show_room_selection(update, context, rooms, operation):
     """显示房间选择界面"""
     keyboard = []
@@ -796,8 +1017,191 @@ async def show_room_selection(update, context, rooms, operation):
         "🏠 請選擇要操作的房間：",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    
+
 async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+    
+    if data.startswith('select_room_'):
+        # 处理房间选择
+        parts = data.split('_')
+        room_code = parts[2]
+        operation = parts[3]
+        
+        context.user_data['current_room'] = room_code
+        
+        if operation == 'query_all':
+            await query_all_todos_from_callback(query, context, room_code)
+        elif operation == 'query_category':
+            await choose_category_from_callback(query, context, 'query')
+        elif operation == 'add_todo':
+            await choose_category_from_callback(query, context, 'add')
+        elif operation == 'delete_todo':
+            await choose_delete_from_callback(query, context, room_code)
+    
+    elif data.startswith('add_category_'):
+        category = data.split('_')[2]
+        context.user_data['waiting_category'] = category
+        context.user_data['waiting_task'] = True
+        await query.edit_message_text(TEXTS['enter_task'])
+    
+    elif data.startswith('query_category_'):
+        category = data.split('_')[2]
+        room_code = context.user_data.get('current_room')
+        if room_code:
+            await show_todos_by_category(query, context, room_code, category)
+        else:
+            await query.edit_message_text(TEXTS['not_in_room'])
+    
+    elif data.startswith('delete_'):
+        room_code = context.user_data.get('current_room')
+        if not room_code:
+            await query.edit_message_text(TEXTS['not_in_room'])
+            return
+        
+        todo_id = int(data.split('_')[1])
+        if delete_todo(room_code, todo_id, context):
+            await query.edit_message_text(TEXTS['task_deleted'])
+        else:
+            await query.edit_message_text("❌ 刪除失敗")
+        
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="操作完成",
+            reply_markup=get_main_keyboard()
+        )
+    
+    elif data == 'set_reminder':
+        # 用户选择设置提醒
+        await query.edit_message_text(
+            TEXTS['select_date'],
+            reply_markup=create_date_keyboard()  # 确保这里提供了键盘
+        )
+    
+    elif data == 'skip_reminder':
+        # 用户选择跳过提醒
+        await query.edit_message_text(
+            "已跳過提醒設置",
+            reply_markup=get_main_keyboard()  # 添加键盘
+        )
+        context.user_data.pop('last_todo', None)
+    
+    elif data.startswith('remind_date_'):
+        # 用户选择了日期
+        date_str = data.split('_')[2]
+        context.user_data['reminder_date'] = date_str
+        await query.edit_message_text(
+            TEXTS['select_time'],
+            reply_markup=create_time_keyboard()  # 确保这里提供了键盘
+        )
+    
+    elif data.startswith('remind_time_'):
+        # 用户选择了时间
+        time_str = data.split('_')[2]
+        date_str = context.user_data.get('reminder_date')
+        
+        if not date_str or 'last_todo' not in context.user_data:
+            await query.edit_message_text("設置失敗，請重新嘗試")
+            return
+        
+        # 解析日期和时间
+        try:
+            reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            now = datetime.now()
+            
+            if reminder_datetime <= now:
+                await query.edit_message_text(
+                    "❌ 不能設置過去的時間作為提醒",
+                    reply_markup=get_main_keyboard()  # 添加键盘
+                )
+                return
+            
+            # 计算延迟时间（秒）
+            delay = (reminder_datetime - now).total_seconds()
+            
+            # 获取待办信息
+            todo_info = context.user_data['last_todo']
+            
+            # 安排提醒任务
+            context.job_queue.run_once(
+                send_reminder, 
+                delay, 
+                data={
+                    'room_code': todo_info['room_code'],
+                    'task': todo_info['task'],
+                    'category': todo_info['category']
+                }
+            )
+            
+            await query.edit_message_text(
+                TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
+                reply_markup=get_main_keyboard()  # 添加键盘
+            )
+            
+        except Exception as e:
+            logger.error(f"設置提醒失敗: {e}")
+            await query.edit_message_text(
+                "❌ 設置提醒失敗",
+                reply_markup=get_main_keyboard()  # 添加键盘
+            )
+        
+        # 清理用户数据
+        context.user_data.pop('last_todo', None)
+        context.user_data.pop('reminder_date', None)
+    
+    elif data == 'cancel_reminder':
+        # 用户取消设置提醒
+        context.user_data.pop('last_todo', None)
+        context.user_data.pop('reminder_date', None)
+        await query.edit_message_text(
+            "已取消提醒設置",
+            reply_markup=get_main_keyboard()  # 添加键盘
+        )
+    
+    elif data == 'custom_date':
+        # 处理自定义日期选择
+        await query.edit_message_text(
+            "請輸入日期 (格式: YYYY-MM-DD)：",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel_reminder")]])
+        )
+        context.user_data['waiting_custom_date'] = True
+    
+    elif data == 'custom_time':
+        # 处理自定义时间选择
+        await query.edit_message_text(
+            "請輸入時間 (格式: HH:MM)：",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel_reminder")]])
+        )
+        context.user_data['waiting_custom_time'] = True
+    
+    elif data.startswith('leave_'):
+        room_code = data.split('_')[1]
+        success, message = leave_room(room_code, user_id)
+        
+        if success:
+            await query.edit_message_text(TEXTS['leave_success'].format(message))
+            # 如果离开的是当前操作的房间，清除当前房间设置
+            if context.user_data.get('current_room') == room_code:
+                context.user_data.pop('current_room', None)
+        else:
+            await query.edit_message_text(TEXTS['leave_failed'])
+        
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="操作完成",
+            reply_markup=get_main_keyboard()
+        )
+    
+    elif data == 'cancel_leave':
+        await query.edit_message_text("已取消離開房間")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="返回主菜单",
+            reply_markup=get_main_keyboard()
+        )
+
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
