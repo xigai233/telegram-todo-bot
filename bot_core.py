@@ -906,189 +906,6 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         context.user_data['current_room'] = room_code
         
-        if operation == 'query_all':
-            await query_all_todos_from_callback(query, context, room_code)
-        elif operation == 'query_category':
-            await choose_category_from_callback(query, context, 'query')
-        elif operation == 'add_todo':
-            await choose_category_from_callback(query, context, 'add')
-        elif operation == 'delete_todo':
-            await choose_delete_from_callback(query, context, room_code)
-    
-    elif data.startswith('add_category_'):
-        category = data.split('_')[2]
-        context.user_data['waiting_category'] = category
-        context.user_data['waiting_task'] = True
-        await query.edit_message_text(TEXTS['enter_task'])
-    
-    elif data.startswith('query_category_'):
-        category = data.split('_')[2]
-        room_code = context.user_data.get('current_room')
-        if room_code:
-            await show_todos_by_category(query, context, room_code, category)
-        else:
-            await query.edit_message_text(TEXTS['not_in_room'])
-    
-    elif data.startswith('delete_'):
-        room_code = context.user_data.get('current_room')
-        if not room_code:
-            await query.edit_message_text(TEXTS['not_in_room'])
-            return
-        
-        todo_id = int(data.split('_')[1])
-        if delete_todo(room_code, todo_id, context):
-            await query.edit_message_text(TEXTS['task_deleted'])
-        else:
-            await query.edit_message_text("❌ 刪除失敗")
-        
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="操作完成",
-            reply_markup=get_main_keyboard()
-        )
-    
-    elif data == 'set_reminder':
-        # 用户选择设置提醒
-        await query.edit_message_text(
-            TEXTS['select_date'],
-            reply_markup=create_date_keyboard()  # 确保这里提供了键盘
-        )
-    
-    elif data == 'skip_reminder':
-        # 用户选择跳过提醒
-        await query.edit_message_text(
-            "已跳過提醒設置",
-            reply_markup=get_main_keyboard()  # 添加键盘
-        )
-        context.user_data.pop('last_todo', None)
-    
-    elif data.startswith('remind_date_'):
-        # 用户选择了日期
-        date_str = data.split('_')[2]
-        context.user_data['reminder_date'] = date_str
-        await query.edit_message_text(
-            TEXTS['select_time'],
-            reply_markup=create_time_keyboard()  # 确保这里提供了键盘
-        )
-    
-    elif data.startswith('remind_time_'):
-        # 用户选择了时间
-        time_str = data.split('_')[2]
-        date_str = context.user_data.get('reminder_date')
-        
-        if not date_str or 'last_todo' not in context.user_data:
-            await query.edit_message_text("設置失敗，請重新嘗試")
-            return
-        
-        # 解析日期和时间
-        try:
-            reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            now = datetime.now()
-            
-            if reminder_datetime <= now:
-                await query.edit_message_text(
-                    "❌ 不能設置過去的時間作為提醒",
-                    reply_markup=get_main_keyboard()  # 添加键盘
-                )
-                return
-            
-            # 计算延迟时间（秒）
-            delay = (reminder_datetime - now).total_seconds()
-            
-            # 获取待办信息
-            todo_info = context.user_data['last_todo']
-            
-            # 安排提醒任务
-            context.job_queue.run_once(
-                send_reminder, 
-                delay, 
-                data={
-                    'room_code': todo_info['room_code'],
-                    'task': todo_info['task'],
-                    'category': todo_info['category']
-                }
-            )
-            
-            await query.edit_message_text(
-                TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
-                reply_markup=get_main_keyboard()  # 添加键盘
-            )
-            
-        except Exception as e:
-            logger.error(f"設置提醒失敗: {e}")
-            await query.edit_message_text(
-                "❌ 設置提醒失敗",
-                reply_markup=get_main_keyboard()  # 添加键盘
-            )
-        
-        # 清理用户数据
-        context.user_data.pop('last_todo', None)
-        context.user_data.pop('reminder_date', None)
-    
-    elif data == 'cancel_reminder':
-        # 用户取消设置提醒
-        context.user_data.pop('last_todo', None)
-        context.user_data.pop('reminder_date', None)
-        await query.edit_message_text(
-            "已取消提醒設置",
-            reply_markup=get_main_keyboard()  # 添加键盘
-        )
-    
-    elif data == 'custom_date':
-        # 处理自定义日期选择
-        await query.edit_message_text(
-            "請輸入日期 (格式: YYYY-MM-DD)：",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel_reminder")]])
-        )
-        context.user_data['waiting_custom_date'] = True
-    
-    elif data == 'custom_time':
-        # 处理自定义时间选择
-        await query.edit_message_text(
-            "請輸入時間 (格式: HH:MM)：",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel_reminder")]])
-        )
-        context.user_data['waiting_custom_time'] = True
-    
-    elif data.startswith('leave_'):
-        room_code = data.split('_')[1]
-        success, message = leave_room(room_code, user_id)
-        
-        if success:
-            await query.edit_message_text(TEXTS['leave_success'].format(message))
-            # 如果离开的是当前操作的房间，清除当前房间设置
-            if context.user_data.get('current_room') == room_code:
-                context.user_data.pop('current_room', None)
-        else:
-            await query.edit_message_text(TEXTS['leave_failed'])
-        
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="操作完成",
-            reply_markup=get_main_keyboard()
-        )
-    
-    elif data == 'cancel_leave':
-        await query.edit_message_text("已取消離開房間")
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="返回主菜单",
-            reply_markup=get_main_keyboard()
-        )
-
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-    
-    if data.startswith('select_room_'):
-        # 处理房间选择
-        parts = data.split('_')
-        room_code = parts[2]
-        operation = parts[3]
-        
-        context.user_data['current_room'] = room_code
-        
         if operation == TEXTS['query_all']:
             await query_all_todos_from_callback(query, context, room_code)
         elif operation == TEXTS['query_category']:
@@ -1343,7 +1160,6 @@ def main():
         # 启动极简健康检查服务器（替代Flask）
         def run_simple_server():
             import socket
-            import time  # 在函数内部导入time
             port = int(os.getenv('PORT', 10000))
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(('0.0.0.0', port))
@@ -1356,6 +1172,7 @@ def main():
                         if b'GET /' in data or b'GET /health' in data:
                             conn.send(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK')
                         conn.close()
+                    # 使用全局的time模块
                     time.sleep(0.1)  # 添加短暂延迟避免CPU占用过高
         
         # 启动健康检查服务器在后台线程
@@ -1363,9 +1180,7 @@ def main():
         health_thread.start()
         logger.info("Health check server started for port detection")
         
-        # 给服务器一点时间启动
-        time.sleep(2)  # 这里使用的是全局的time模块
-        
+          
         application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
@@ -1389,12 +1204,10 @@ def main():
         if "Conflict" in str(e):
             logger.info("Another instance detected, this is normal on Render")
             # 在Render上，冲突是正常的，我们继续运行
-            import time
             time.sleep(60)  # 等待一段时间再退出
         raise
     finally:
         close_db_pool()
-
 
 if __name__ == '__main__':
     # 直接调用同步的 main 函数
