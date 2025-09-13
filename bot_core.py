@@ -14,6 +14,7 @@ import asyncio
 import json
 import string
 from urllib.parse import urlparse
+from flask import Flask
 
 # 配置日志 - 减少噪音
 logging.basicConfig(
@@ -1158,15 +1159,37 @@ def main():
     """主函数"""
     init_db()
     # 创建应用
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # 添加处理器
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(callback_query))
+    # 注册处理器
+    register_handlers(application)
     
-    # 启动应用
+    # 启动机器人
+    logger.info("Bot started")
+    
+    # 启动一个简单的HTTP服务器来绑定端口（Render要求）
+    port = int(os.environ.get('PORT', 10000))
+    
+    # 使用Flask创建一个简单的HTTP服务器
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def home():
+        return 'Telegram Bot is running!'
+    
+    @app.route('/health')
+    def health_check():
+        return 'OK', 200
+    
+    # 在单独的线程中启动Flask应用
+    from threading import Thread
+    flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False))
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    logger.info(f"HTTP server started on port {port}")
+    
+    # 启动Telegram机器人
     application.run_polling()
 
 if __name__ == '__main__':
