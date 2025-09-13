@@ -15,7 +15,9 @@ import json
 import string
 from urllib.parse import urlparse
 from flask import Flask
-
+import signal
+import requests
+from telegram.request import HTTPXRequest
 # 配置日志 - 减少噪音
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -1158,14 +1160,16 @@ async def choose_delete_from_callback(query, context: ContextTypes.DEFAULT_TYPE,
 def main():
     """主函数"""
     init_db()
-    # 创建应用
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # 1. 创建一个使用自定义超时时间的 Request 对象
+    # 这能显著提高健康检查的响应速度，减少实例堆积的可能性
+    request = HTTPXRequest(connect_timeout=5.0, read_timeout=5.0)
+    
+    # 2. 将这个 Request 对象传递给 Bot
+    application = Application.builder().token(TOKEN).request(request).build()
     
     # 注册处理器
     register_handlers(application)
-    
-    # 启动机器人
-    logger.info("Bot started")
     
     # 启动一个简单的HTTP服务器来绑定端口（Render要求）
     port = int(os.environ.get('PORT', 10000))
@@ -1179,18 +1183,39 @@ def main():
     
     @app.route('/health')
     def health_check():
+        # 健康检查端点立即返回，不等待任何其他操作
         return 'OK', 200
     
-    # 在单独的线程中启动Flask应用
+    # 3. 定义一个优雅关闭的信号处理函数
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}. Shutting down gracefully...")
+        # 停止轮询，允许当前正在处理的任务完成
+        if application.running:
+            application.stop()
+        # 这里可以添加其他清理工作，如关闭数据库连接池
+        logger.info("Bot shutdown complete.")
+        # 注意：在 Render 环境中，最好不要调用 sys.exit()，让平台自然结束进程。
+    
+    # 4. 注册信号处理器（用于接收 Render 的关闭信号）
+    signal.signal(signal.SIGTERM, signal_handler) # Render 发送 SIGTERM 来停止实例
+    signal.signal(signal.SIGINT, signal_handler)  # 用于本地开发的 Ctrl+C
+    
+    logger.info("Starting bot with polling mode...")
+    logger.info(f"HTTP health server started on port {port}")
+    
+    # 5. 在单独的线程中启动Flask应用
     from threading import Thread
     flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False))
     flask_thread.daemon = True
     flask_thread.start()
     
-    logger.info(f"HTTP server started on port {port}")
-    
-    # 启动Telegram机器人
-    application.run_polling()
-
+    # 6. 在主线程中启动机器人轮询
+    # 使用 `idle()` 而不是 `run_polling()` 以便更好地与信号处理器配合
+    try:
+        application.run_polling(stop_signals=None) # 将 stop_signals 设为 None，因为我们自己处理信号
+    except Exception as e:
+        logger.error(f"Polling failed: {e}")
+    finally:
+        logger.info("Main polling loop exited.")
 if __name__ == '__main__':
     main()
