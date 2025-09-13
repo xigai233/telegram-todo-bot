@@ -1156,6 +1156,19 @@ async def choose_delete_from_callback(query, context: ContextTypes.DEFAULT_TYPE,
         TEXTS['choose_task_to_delete'],
         reply_markup=get_delete_keyboard(todos)
     )
+def register_handlers(application):
+    """注册所有处理器"""
+    # 命令处理器
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    
+    # 消息处理器 - 处理所有文本消息
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # 回调查询处理器 - 处理所有按钮点击
+    application.add_handler(CallbackQueryHandler(callback_query))
+    
+    logger.info("所有处理器注册完成")
 
 def main():
     """主函数"""
