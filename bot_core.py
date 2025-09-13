@@ -10,6 +10,8 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import psycopg2
 import psycopg2.pool
+import asyncio
+import json
 
 # 配置日志 - 减少噪音
 logging.basicConfig(
@@ -93,7 +95,14 @@ TEXTS = {
     'choose_room_to_leave': '🚪 請選擇要離開的房間：',
     'room_notification': '📢 房間通知：{}',
     'current_rooms': '🏠 您當前所在的房間：',
-    'no_rooms_joined': '📭 您尚未加入任何房間'
+    'no_rooms_joined': '📭 您尚未加入任何房間',
+    'ask_reminder': '⏰ 是否需要設置定時提醒？',
+    'create_reminder': '創建提醒⏰',
+    'skip_reminder': '跳過⏩',
+    'select_date': '📅 請選擇提醒日期：',
+    'select_time': '⏰ 請選擇提醒時間：',
+    'reminder_set': '✅ 提醒設置成功！將在 {} 發送提醒',
+    'reminder_message': '🔔 提醒：{}'
 }
 
 # Categories
@@ -316,6 +325,7 @@ def migrate_database():
                 user_id BIGINT,
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                FOREIGN KEY(user_id) REFERENCES users(user_id),
                 UNIQUE(room_code, user_id)
             )
         ''')
@@ -569,6 +579,51 @@ def get_leave_room_keyboard(rooms):
         keyboard.append([InlineKeyboardButton(f"{room_name} ({room_code})", callback_data=f'leave_{room_code}')])
     keyboard.append([InlineKeyboardButton('⬅️ 取消', callback_data='cancel_leave')])
     return InlineKeyboardMarkup(keyboard)
+def get_reminder_keyboard():
+    """提醒选择键盘"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(TEXTS['create_reminder'], callback_data='set_reminder')],
+        [InlineKeyboardButton(TEXTS['skip_reminder'], callback_data='skip_reminder')]
+    ])
+def create_date_keyboard():
+    """创建日期选择键盘"""
+    today = datetime.now()
+    keyboard = []
+    
+    # 今天、明天、后天
+    for i in range(3):
+        date = today + timedelta(days=i)
+        button_text = f"{'今天' if i == 0 else '明天' if i == 1 else '后天'} ({date.strftime('%m/%d')})"
+        callback_data = f"remind_date_{date.strftime('%Y-%m-%d')}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    
+    # 自定义日期选项
+    keyboard.append([InlineKeyboardButton("選擇其他日期", callback_data="custom_date")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def create_time_keyboard():
+    """创建时间选择键盘"""
+    keyboard = []
+    times = [
+        ["09:00", "12:00", "15:00"],
+        ["18:00", "21:00", "00:00"],
+        ["選擇其他時間", "取消"]
+    ]
+    
+    for row in times:
+        button_row = []
+        for time in row:
+            if time == "選擇其他時間":
+                button_row.append(InlineKeyboardButton(time, callback_data="custom_time"))
+            elif time == "取消":
+                button_row.append(InlineKeyboardButton(time, callback_data="cancel_reminder"))
+            else:
+                button_row.append(InlineKeyboardButton(time, callback_data=f"remind_time_{time}"))
+        keyboard.append(button_row)
+    
+    return InlineKeyboardMarkup(keyboard)
+
 # Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -705,13 +760,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 todo_id = add_todo_to_db(current_room, user_id, category, task, context)
                 if todo_id:
+                    context.user_data['last_todo'] = {
+                        'id': todo_id,
+                        'category': category,
+                        'task': task,
+                        'room_code': current_room
+                    }
                     await update.message.reply_text(
-                        TEXTS['task_added'],
-                        reply_markup=get_main_keyboard()
+                        TEXTS['ask_reminder'],
+                        reply_markup=get_reminder_keyboard()
                     )
                 else:
                     await update.message.reply_text(
-                        "❌ 添加失敗，您可能已離開該房間",
+                        "❌ 添加失敗，請確認您仍在該房間中",
                         reply_markup=get_main_keyboard()
                     )
             except Exception as e:
@@ -787,7 +848,82 @@ async def callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             reply_markup=get_main_keyboard()
         )
-    
+    elif data == 'set_reminder':
+    # 用户选择设置提醒
+    await query.edit_message_text(
+        TEXTS['select_date'],
+        reply_markup=create_date_keyboard()
+    )
+    elif data == 'skip_reminder':
+        # 用户选择跳过提醒
+        await query.edit_message_text(
+            "已跳過提醒設置",
+            reply_markup=get_main_keyboard()
+        )
+        context.user_data.pop('last_todo', None)
+    elif data.startswith('remind_date_'):
+        # 用户选择了日期
+        date_str = data.split('_')[2]
+        context.user_data['reminder_date'] = date_str
+        await query.edit_message_text(
+            TEXTS['select_time'],
+            reply_markup=create_time_keyboard()
+        )
+    elif data.startswith('remind_time_'):
+        # 用户选择了时间
+        time_str = data.split('_')[2]
+        date_str = context.user_data.get('reminder_date')
+        
+        if not date_str or 'last_todo' not in context.user_data:
+            await query.edit_message_text("設置失敗，請重新嘗試")
+            return
+        
+        # 解析日期和时间
+        try:
+            reminder_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            now = datetime.now()
+            
+            if reminder_datetime <= now:
+                await query.edit_message_text("❌ 不能設置過去的時間作為提醒")
+                return
+            
+            # 计算延迟时间（秒）
+            delay = (reminder_datetime - now).total_seconds()
+            
+            # 获取待办信息
+            todo_info = context.user_data['last_todo']
+            
+            # 安排提醒任务
+            context.job_queue.run_once(
+                send_reminder, 
+                delay, 
+                data={
+                    'room_code': todo_info['room_code'],
+                    'task': todo_info['task'],
+                    'category': todo_info['category']
+                }
+            )
+            
+            await query.edit_message_text(
+                TEXTS['reminder_set'].format(reminder_datetime.strftime("%Y-%m-%d %H:%M")),
+                reply_markup=get_main_keyboard()
+            )
+            
+        except Exception as e:
+            logger.error(f"設置提醒失敗: {e}")
+            await query.edit_message_text("❌ 設置提醒失敗")
+        
+        # 清理用户数据
+        context.user_data.pop('last_todo', None)
+        context.user_data.pop('reminder_date', None)
+    elif data == 'cancel_reminder':
+        # 用户取消设置提醒
+        context.user_data.pop('last_todo', None)
+        context.user_data.pop('reminder_date', None)
+        await query.edit_message_text(
+            "已取消提醒設置",
+            reply_markup=get_main_keyboard()
+        )
     elif data.startswith('leave_'):
         room_code = data.split('_')[1]
         success, message = leave_room(room_code, user_id)
@@ -857,6 +993,35 @@ async def show_todos_by_category(query, context: ContextTypes.DEFAULT_TYPE, room
         message += f"{i}. {task}\n"
     
     await query.edit_message_text(message)
+async def send_reminder(context):
+    """发送提醒消息"""
+    job_data = context.job.data
+    room_code = job_data['room_code']
+    task = job_data['task']
+    category = job_data['category']
+    
+    category_name = CATEGORIES.get(category, category)
+    message = TEXTS['reminder_message'].format(f"{category_name}: {task}")
+    
+    # 向房间所有成员发送提醒
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM room_members WHERE room_code = %s", (room_code,))
+        members = c.fetchall()
+        
+        for (user_id,) in members:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message
+                )
+            except Exception as e:
+                logger.error(f"發送提醒給用戶 {user_id} 失敗: {e}")
+    except Exception as e:
+        logger.error(f"獲取房間成員失敗: {e}")
+    finally:
+        put_db_connection(conn)
 async def choose_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, room_code):
     todos = get_todos(room_code)
     if not todos:
