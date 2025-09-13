@@ -34,8 +34,6 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# 全局连接池
-db_pool = None
 
 # 只保留繁体中文文本
 TEXTS = {
@@ -104,37 +102,19 @@ def parse_database_url(url):
         f"host={parsed.hostname} port={parsed.port} sslmode=require"
     )
 
-# 初始化数据库连接池
-def init_db_pool():
-    global db_pool
-    try:
-        dsn = parse_database_url(DATABASE_URL)
-        db_pool = psycopg2.pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=10,
-            dsn=dsn
-        )
-        logger.info("Database connection pool initialized")
-    except Exception as e:
-        logger.critical(f"Database pool initialization failed: {e}")
-        raise
-
-def close_db_pool():
-    global db_pool
-    if db_pool:
-        db_pool.closeall()
-        logger.info("Database connection pool closed")
+# 初始化数据库  
 
 def get_db_connection():
-    global db_pool
-    if db_pool is None:
-        init_db_pool()
-    return db_pool.getconn()
+    try:
+        dsn = parse_database_url(DATABASE_URL)
+        return psycopg2.connect(dsn)
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        raise
 
 def put_db_connection(conn):
-    global db_pool
-    if db_pool and conn:
-        db_pool.putconn(conn)
+    if conn:
+        conn.close()
 
 # 房间管理功能
 def generate_room_code():
@@ -1173,7 +1153,6 @@ async def choose_delete_from_callback(query, context: ContextTypes.DEFAULT_TYPE,
 
 def main():
     """主函数"""
-    init_db_pool()
     init_db()
     # 创建应用
     application = Application.builder().token(TOKEN).build()
