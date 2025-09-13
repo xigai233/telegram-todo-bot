@@ -96,7 +96,23 @@ CATEGORIES = {
     'movie': '📺 影視',
     'action': '⭐ 行動'
 }
-
+def signal_handler(signum, frame):
+    logger.info(f"Received signal {signum}. Shutting down gracefully...")
+    
+    # 创建一个新的事件循环来运行异步关闭代码
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        # 停止轮询，允许当前正在处理的任务完成
+        if application.running:
+            loop.run_until_complete(application.stop())
+        # 这里可以添加其他清理工作，如关闭数据库连接池
+        logger.info("Bot shutdown complete.")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+    finally:
+        loop.close()
 # 解析 DATABASE_URL 到 dsn
 def parse_database_url(url):
     parsed = urlparse(url)
@@ -1175,7 +1191,6 @@ def main():
     init_db()
     
     # 1. 创建一个使用自定义超时时间的 Request 对象
-    # 这能显著提高健康检查的响应速度，减少实例堆积的可能性
     request = HTTPXRequest(connect_timeout=5.0, read_timeout=5.0)
     
     # 2. 将这个 Request 对象传递给 Bot
@@ -1202,12 +1217,23 @@ def main():
     # 3. 定义一个优雅关闭的信号处理函数
     def signal_handler(signum, frame):
         logger.info(f"Received signal {signum}. Shutting down gracefully...")
-        # 停止轮询，允许当前正在处理的任务完成
-        if application.running:
-            application.stop()
-        # 这里可以添加其他清理工作，如关闭数据库连接池
-        logger.info("Bot shutdown complete.")
-        # 注意：在 Render 环境中，最好不要调用 sys.exit()，让平台自然结束进程。
+        
+        # 创建一个新的事件循环来运行异步关闭代码
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # 停止轮询，允许当前正在处理的任务完成
+            if application.running:
+                loop.run_until_complete(application.stop())
+            # 这里可以添加其他清理工作，如关闭数据库连接池
+            logger.info("Bot shutdown complete.")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            loop.close()
+        
+        # 在 Render 环境中，最好不要调用 sys.exit()，让平台自然结束进程。
     
     # 4. 注册信号处理器（用于接收 Render 的关闭信号）
     signal.signal(signal.SIGTERM, signal_handler) # Render 发送 SIGTERM 来停止实例
@@ -1223,12 +1249,12 @@ def main():
     flask_thread.start()
     
     # 6. 在主线程中启动机器人轮询
-    # 使用 `idle()` 而不是 `run_polling()` 以便更好地与信号处理器配合
     try:
         application.run_polling(stop_signals=None) # 将 stop_signals 设为 None，因为我们自己处理信号
     except Exception as e:
         logger.error(f"Polling failed: {e}")
     finally:
         logger.info("Main polling loop exited.")
+
 if __name__ == '__main__':
     main()
