@@ -1120,7 +1120,7 @@ async def process_time_selection(query, context, time_str):
     except Exception as e:
         logger.error(f"設置提醒失敗: {e}")
         await query.edit_message_text("❌ 設置提醒失敗")
-        
+
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE, operation_type):
     await update.message.reply_text(
         TEXTS['choose_category'],
@@ -1227,10 +1227,11 @@ def main():
         init_db_pool()
         init_db()
         
-        # 启动健康检查服务器
-        health_thread = threading.Thread(target=run_health_check_server, daemon=True)
-        health_thread.start()
-        logger.info("Health check server started for port detection")
+        # 在 Render 上不需要健康检查服务器，因为 Render 有内置的健康检查
+        # 可以移除或注释掉健康检查服务器的代码
+        # health_thread = threading.Thread(target=run_health_check_server, daemon=True)
+        # health_thread.start()
+        # logger.info("Health check server started for port detection")
         
         application = Application.builder().token(TOKEN).build()
         
@@ -1240,35 +1241,21 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(callback_query))
         
-        # 使用Webhook而不是Polling
-        port = int(os.getenv('PORT', 10000))
-        webhook_url = os.getenv('WEBHOOK_URL')
-        
-        if webhook_url:
-            # 生产环境使用Webhook
-            logger.info("Starting bot with webhook mode...")
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=TOKEN,
-                webhook_url=f"{webhook_url}/{TOKEN}",
-                drop_pending_updates=True
-            )
-        else:
-            # 开发环境使用Polling
-            logger.info("Starting bot with polling mode...")
-            application.run_polling(
-                poll_interval=2.0,
-                timeout=15,
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES
-            )
+        # 在 Render 上使用 polling 模式
+        logger.info("Starting bot with polling mode...")
+        application.run_polling(
+            poll_interval=2.0,
+            timeout=15,
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
             
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         raise
     finally:
         close_db_pool()
+
 if __name__ == '__main__':
     # 直接调用同步的 main 函数
     main()
