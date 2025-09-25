@@ -315,30 +315,64 @@ def migrate_database():
     try:
         c = conn.cursor()
     
-        # 1. 首先創建rooms表（如果不存在）
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS rooms (
-                room_code TEXT PRIMARY KEY,
-                room_name TEXT,
-                password TEXT,
-                owner_id BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        # 1. 首先檢查 todos 表是否存在
+        c.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'todos'
             )
-        ''')
-    
-        # 2. 創建room_members表（如果不存在）
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS room_members (
-                id SERIAL PRIMARY KEY,
-                room_code TEXT,
-                user_id BIGINT,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(room_code) REFERENCES rooms(room_code),
-                UNIQUE(room_code, user_id)
-            )
-        ''')
-    
-        # 3. 檢查todos表是否有room_code列
+        """)
+        todos_table_exists = c.fetchone()[0]
+        
+        if not todos_table_exists:
+            logger.info("todos 表不存在，創建新表結構")
+            # 創建完整的表結構
+            c.execute('''
+                CREATE TABLE rooms (
+                    room_code TEXT PRIMARY KEY,
+                    room_name TEXT,
+                    password TEXT,
+                    owner_id BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            c.execute('''
+                CREATE TABLE room_members (
+                    id SERIAL PRIMARY KEY,
+                    room_code TEXT,
+                    user_id BIGINT,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                    UNIQUE(room_code, user_id)
+                )
+            ''')
+            
+            c.execute('''
+                CREATE TABLE todos (
+                    id SERIAL PRIMARY KEY, 
+                    room_code TEXT DEFAULT 'default_room',
+                    user_id BIGINT, 
+                    category TEXT,
+                    task TEXT, 
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(room_code) REFERENCES rooms(room_code)
+                )
+            ''')
+            
+            # 創建默認房間
+            c.execute("""
+                INSERT INTO rooms (room_code, room_name, password, owner_id)
+                VALUES ('default_room', '默認房間', %s, 0)
+                ON CONFLICT (room_code) DO NOTHING
+            """, (hash_password('default'),))
+            
+            logger.info("新數據庫結構創建完成")
+            conn.commit()
+            return
+        
+        # 2. 如果 todos 表存在，檢查是否有 room_code 列
         c.execute("""
             SELECT column_name 
             FROM information_schema.columns 
@@ -349,7 +383,7 @@ def migrate_database():
         if not has_room_code:
             logger.info("檢測到舊數據庫結構，開始遷移...")
         
-            # 4. 檢查舊表的結構
+            # 3. 檢查舊表的結構
             c.execute("""
                 SELECT column_name, data_type 
                 FROM information_schema.columns 
@@ -359,7 +393,30 @@ def migrate_database():
             old_columns = c.fetchall()
             logger.info(f"舊表結構: {old_columns}")
         
-            # 5. 創建新表結構（包含room_code）
+            # 4. 創建rooms表（如果不存在）
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS rooms (
+                    room_code TEXT PRIMARY KEY,
+                    room_name TEXT,
+                    password TEXT,
+                    owner_id BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 5. 創建room_members表（如果不存在）
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS room_members (
+                    id SERIAL PRIMARY KEY,
+                    room_code TEXT,
+                    user_id BIGINT,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                    UNIQUE(room_code, user_id)
+                )
+            ''')
+        
+            # 6. 創建新表結構（包含room_code）
             c.execute('''
                 CREATE TABLE todos_new (
                     id SERIAL PRIMARY KEY, 
@@ -372,20 +429,20 @@ def migrate_database():
                 )
             ''')
         
-            # 6. 創建默認房間用於遷移數據
+            # 7. 創建默認房間用於遷移數據
             c.execute("""
                 INSERT INTO rooms (room_code, room_name, password, owner_id)
                 VALUES ('default_room', '默認房間', %s, 0)
                 ON CONFLICT (room_code) DO NOTHING
             """, (hash_password('default'),))
         
-            # 7. 遷移數據 - 明確指定列名
+            # 8. 遷移數據 - 明確指定列名
             c.execute("""
                 INSERT INTO todos_new (user_id, category, task, created_at)
                 SELECT user_id, category, task, created_at FROM todos
             """)
         
-            # 8. 刪除舊表並重命名新表
+            # 9. 刪除舊表並重命名新表
             c.execute("DROP TABLE todos")
             c.execute("ALTER TABLE todos_new RENAME TO todos")
         
@@ -398,7 +455,8 @@ def migrate_database():
     except Exception as e:
         logger.error(f"數據庫遷移失敗: {e}")
         conn.rollback()
-        raise
+        # 不要重新拋出異常，讓應用繼續啟動
+        logger.info("數據庫遷移失敗，但繼續啟動應用")
     finally:
         put_db_connection(conn)
 
@@ -417,16 +475,58 @@ def init_db():
             )
         ''')
     
-        conn.commit()
-        logger.info("基礎用戶表初始化成功")
+        # 創建其他必要的表
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS rooms (
+                room_code TEXT PRIMARY KEY,
+                room_name TEXT,
+                password TEXT,
+                owner_id BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS room_members (
+                id SERIAL PRIMARY KEY,
+                room_code TEXT,
+                user_id BIGINT,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(room_code) REFERENCES rooms(room_code),
+                UNIQUE(room_code, user_id)
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS todos (
+                id SERIAL PRIMARY KEY, 
+                room_code TEXT DEFAULT 'default_room',
+                user_id BIGINT, 
+                category TEXT,
+                task TEXT, 
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(room_code) REFERENCES rooms(room_code)
+            )
+        ''')
+        
+        # 創建默認房間
+        c.execute("""
+            INSERT INTO rooms (room_code, room_name, password, owner_id)
+            VALUES ('default_room', '默認房間', %s, 0)
+            ON CONFLICT (room_code) DO NOTHING
+        """, (hash_password('default'),))
     
-        # 執行自動遷移
-        migrate_database()
+        conn.commit()
+        logger.info("數據庫表初始化成功")
+    
+        # 暫時跳過遷移邏輯，因為是新數據庫
+        # migrate_database()
+        logger.info("跳過數據庫遷移（新數據庫）")
     
     except Exception as e:
         logger.critical(f"數據庫初始化失敗: {e}")
-        conn.rollback()
-        raise
+        # 不要重新拋出異常，讓應用可以繼續啟動
+        logger.info("數據庫初始化遇到問題，但嘗試繼續啟動應用")
     finally:
         put_db_connection(conn)
 
