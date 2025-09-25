@@ -586,34 +586,49 @@ def get_todos(room_code, category=None):
     try:
         c = conn.cursor()
     
-        # 確保房間存在
+        # 确保房间存在
         c.execute("SELECT 1 FROM rooms WHERE room_code = %s", (room_code,))
         if not c.fetchone():
-            return []  # 房間不存在，返回空列表
+            return []  # 房间不存在，返回空列表
         
         if category:
             c.execute("""
                 SELECT id, user_id, category, task, created_at
                 FROM todos 
                 WHERE room_code = %s AND category = %s 
-                ORDER BY created_at
+                ORDER BY 
+                    CASE category
+                        WHEN 'game' THEN 1
+                        WHEN 'movie' THEN 2
+                        WHEN 'action' THEN 3
+                        ELSE 4
+                    END,
+                    created_at
             """, (room_code, category))
         else:
             c.execute("""
                 SELECT id, user_id, category, task, created_at
                 FROM todos 
                 WHERE room_code = %s 
-                ORDER BY created_at
+                ORDER BY 
+                    CASE category
+                        WHEN 'game' THEN 1
+                        WHEN 'movie' THEN 2
+                        WHEN 'action' THEN 3
+                        ELSE 4
+                    END,
+                    created_at
             """, (room_code,))
         
         todos = c.fetchall()
         return todos
     
     except Exception as e:
-        logger.error(f"查詢待辦失敗: {e}")
+        logger.error(f"查询待办失败: {e}")
         return []
     finally:
         put_db_connection(conn)
+
 
 def delete_todo(room_code, todo_id, context: ContextTypes.DEFAULT_TYPE = None):
     conn = get_db_connection()
